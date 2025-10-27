@@ -37,6 +37,9 @@ add_executable(${PROJECT_NAME}
         src/upq/PgTypes.cpp
         include/upq/PgTransaction.h
         src/upq/PgTransaction.cpp
+        include/upq/PgNotificationListener.h
+        src/upq/PgNotificationListener.cpp
+        include/upq/meta/PgConcepts.h
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE

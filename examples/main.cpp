@@ -3,6 +3,7 @@
 #include "uvent/Uvent.h"
 #include "upq/PgPool.h"
 #include "upq/PgTransaction.h"
+#include "upq/PgNotificationListener.h"
 
 using namespace usub::uvent;
 
@@ -98,6 +99,52 @@ task::Awaitable<void> test_db_query()
     co_return;
 }
 
+struct MyNotifyHandler
+{
+    usub::uvent::task::Awaitable<void>
+    operator()(std::string channel,
+               std::string payload,
+               int backend_pid) const
+    {
+        std::cout << "payload: " << payload << std::endl;
+        auto& pool = usub::pg::PgPool::instance();
+        auto res = co_await pool.query_awaitable(
+            "SELECT id, name FROM users WHERE id = $1;",
+            1
+        );
+
+        if (res.ok && !res.rows.empty())
+        {
+            std::cout << "reactive fetch -> id=" << res.rows[0].cols[0]
+                << ", name=" << res.rows[0].cols[1] << std::endl;
+        }
+        else
+        {
+            std::cout << "reactive fetch fail: " << res.error << std::endl;
+        }
+
+        co_return;
+    }
+};
+
+task::Awaitable<void> spawn_listener()
+{
+    auto& pool = usub::pg::PgPool::instance();
+
+    auto conn = co_await pool.acquire_connection();
+    using Listener = usub::pg::PgNotificationListener<MyNotifyHandler>;
+    auto listener = std::make_shared<Listener>(
+        "events",
+        conn
+    );
+
+    listener->setHandler(MyNotifyHandler{});
+
+    co_await listener->run();
+    co_return;
+}
+
+
 int main()
 {
     settings::timeout_duration_ms = 5000;
@@ -106,7 +153,7 @@ int main()
 
     usub::pg::PgPool::init_global(
         "localhost", // host
-        "port", // port
+        "12432", // port
         "postgres", // user
         "postgres", // db
         "password", // password
@@ -121,6 +168,8 @@ int main()
             threadIndex
         );
     });
+
+    usub::uvent::system::co_spawn(spawn_listener());
 
     uvent.run();
     return 0;

@@ -154,6 +154,11 @@ namespace usub::pg
         }
     }
 
+    PGconn* PgConnectionLibpq::raw_conn() noexcept
+    {
+        return this->conn_;
+    }
+
     usub::uvent::task::Awaitable<void> PgConnectionLibpq::wait_readable()
     {
         co_await usub::uvent::net::detail::AwaiterRead{this->sock_->get_raw_header()};
@@ -164,5 +169,10 @@ namespace usub::pg
     {
         co_await usub::uvent::net::detail::AwaiterWrite{this->sock_->get_raw_header()};
         co_return;
+    }
+
+    usub::uvent::task::Awaitable<void> PgConnectionLibpq::wait_readable_for_listener()
+    {
+        co_await wait_readable();
     }
 }
