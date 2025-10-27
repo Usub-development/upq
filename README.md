@@ -128,7 +128,6 @@ Requires:
 
 * C++23 compiler (clang ≥16 / gcc ≥13)
 * `libpq` (PostgreSQL client library)
-* `spdlog`
 * uvent headers
 
 Example CMake:
