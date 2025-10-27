@@ -40,6 +40,7 @@ add_executable(${PROJECT_NAME}
         include/upq/PgNotificationListener.h
         src/upq/PgNotificationListener.cpp
         include/upq/meta/PgConcepts.h
+        include/upq/utils/PgValueFormat.h
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
