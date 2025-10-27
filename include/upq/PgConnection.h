@@ -11,19 +11,25 @@
 
 #include "uvent/Uvent.h"
 #include "PgTypes.h"
+#include "meta/PgConcepts.h"
 
 namespace usub::pg
 {
     class PgConnectionLibpq
     {
     public:
+        template <class HandlerT>
+        requires PgNotifyHandler<HandlerT>
+        friend class PgNotificationListener;
+
         PgConnectionLibpq();
+
         ~PgConnectionLibpq();
 
         usub::uvent::task::Awaitable<std::optional<std::string>>
         connect_async(const std::string& conninfo);
 
-        bool connected() const noexcept;
+        [[nodiscard]] bool connected() const noexcept;
 
         usub::uvent::task::Awaitable<QueryResult>
         exec_simple_query_nonblocking(const std::string& sql);
@@ -32,9 +38,12 @@ namespace usub::pg
         usub::uvent::task::Awaitable<QueryResult>
         exec_param_query_nonblocking(const std::string& sql, Args&&... args);
 
+        PGconn* raw_conn() noexcept;
+
     private:
         usub::uvent::task::Awaitable<void> wait_readable();
         usub::uvent::task::Awaitable<void> wait_writable();
+        usub::uvent::task::Awaitable<void> wait_readable_for_listener();
 
     private:
         PGconn* conn_{nullptr};
