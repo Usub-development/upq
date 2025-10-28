@@ -82,6 +82,8 @@ int main()
 }
 ```
 
+### Integration with webserver based on uvent can be found [here](https://github.com/Usub-development/webserver/tree/uvent302/examples/upq_integration).
+
 ---
 
 ### 🔩 Components
