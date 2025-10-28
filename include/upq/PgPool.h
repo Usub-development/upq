@@ -73,11 +73,14 @@ namespace usub::pg
                      const std::string& sql,
                      Args&&... args)
     {
+        // расширили ошибку
         if (!conn || !conn->connected())
         {
             QueryResult bad;
             bad.ok = false;
+            bad.code = PgErrorCode::ConnectionClosed;
             bad.error = "connection invalid";
+            bad.rows_valid = false;
             co_return bad;
         }
 

@@ -47,7 +47,6 @@ namespace usub::pg
                 queue_capacity
             )
         );
-
     }
 
     PgPool& PgPool::instance()
@@ -109,7 +108,7 @@ namespace usub::pg
                 }
             }
 
-            co_await usub::uvent::system::this_coroutine::sleep_for(100us);
+            co_await uvent::system::this_coroutine::sleep_for(100us);
         }
     }
 

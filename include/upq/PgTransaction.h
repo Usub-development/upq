@@ -54,7 +54,27 @@ namespace usub::pg
         {
             QueryResult bad;
             bad.ok = false;
+            bad.code = PgErrorCode::InvalidFuture;
             bad.error = "transaction not active";
+            bad.rows_valid = false;
+            co_return bad;
+        }
+
+        if (!this->conn_->connected())
+        {
+            QueryResult bad;
+            bad.ok = false;
+            bad.code = PgErrorCode::ConnectionClosed;
+            bad.error = "connection lost in transaction";
+            bad.rows_valid = false;
+
+            this->active_ = false;
+            this->rolled_back_ = true;
+            this->committed_ = false;
+
+            this->pool_->release_connection(this->conn_);
+            this->conn_.reset();
+
             co_return bad;
         }
 

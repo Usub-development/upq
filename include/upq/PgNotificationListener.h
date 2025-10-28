@@ -6,6 +6,7 @@
 #include <utility>
 #include <memory>
 #include <concepts>
+#include <iostream>
 
 #include <libpq-fe.h>
 
@@ -35,12 +36,25 @@ namespace usub::pg
 
         usub::uvent::task::Awaitable<void> run()
         {
-            if (!this->conn_ || !this->conn_->connected()) co_return;
+            if (!this->conn_ || !this->conn_->connected())
+            {
+                QueryResult fail;
+                fail.ok = false;
+                fail.code = PgErrorCode::ConnectionClosed;
+                fail.error = "PgNotificationListener: connection invalid at start";
+                fail.rows_valid = false;
+
+                co_return;
+            }
 
             {
                 std::string listen_sql = "LISTEN " + this->channel_ + ";";
                 QueryResult qr = co_await this->conn_->exec_simple_query_nonblocking(listen_sql);
-                if (!qr.ok) co_return;
+
+                if (!qr.ok)
+                {
+                    co_return;
+                }
             }
 
             while (true)
@@ -48,13 +62,44 @@ namespace usub::pg
                 co_await this->conn_->wait_readable_for_listener();
 
                 PGconn* raw = this->conn_->raw_conn();
-                if (!raw) co_return;
+                if (!raw)
+                {
+                    QueryResult fail;
+                    fail.ok = false;
+                    fail.code = PgErrorCode::ConnectionClosed;
+                    fail.error = "PgNotificationListener: raw_conn() == nullptr";
+                    fail.rows_valid = false;
+
+                    co_return;
+                }
 
                 if (PQconsumeInput(raw) == 0)
                 {
                     const char* emsg = PQerrorMessage(raw);
 
-                    if (PQstatus(raw) == CONNECTION_BAD) co_return;
+                    if (PQstatus(raw) == CONNECTION_BAD)
+                    {
+                        QueryResult fail;
+                        fail.ok = false;
+                        fail.code = PgErrorCode::ConnectionClosed;
+                        fail.error = (emsg && *emsg)
+                                         ? std::string("CONNECTION_BAD: ") + emsg
+                                         : "CONNECTION_BAD";
+                        fail.rows_valid = false;
+
+                        co_return;
+                    }
+
+                    {
+                        QueryResult warn;
+                        warn.ok = false;
+                        warn.code = PgErrorCode::SocketReadFailed;
+                        warn.error = (emsg && *emsg)
+                                         ? std::string("PQconsumeInput failed: ") + emsg
+                                         : "PQconsumeInput failed";
+                        warn.rows_valid = false;
+
+                    }
 
                     continue;
                 }
@@ -62,13 +107,17 @@ namespace usub::pg
                 while (true)
                 {
                     PGnotify* n = PQnotifies(raw);
-                    if (!n) break;
+                    if (!n)
+                        break;
 
                     const char* ch_raw = n->relname ? n->relname : "";
                     const char* pl_raw = n->extra ? n->extra : "";
                     int be_pid = n->be_pid;
 
-                    if (this->has_handler_) dispatch_async(ch_raw, pl_raw, be_pid);
+                    if (this->has_handler_)
+                    {
+                        dispatch_async(ch_raw, pl_raw, be_pid);
+                    }
 
                     PQfreemem(n);
                 }
@@ -93,7 +142,6 @@ namespace usub::pg
             );
             co_return;
         }
-
 
         void dispatch_async(std::string_view ch,
                             std::string_view payload,
