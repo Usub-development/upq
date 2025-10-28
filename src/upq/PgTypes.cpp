@@ -5,12 +5,12 @@ namespace usub::pg
     void QueryState::set_result(QueryResult&& r)
     {
         {
-            std::lock_guard lk(mtx);
-            result = std::move(r);
-            ready.store(true, std::memory_order_release);
+            std::lock_guard lk(this->mtx);
+            this->result = std::move(r);
+            this->ready.store(true, std::memory_order_release);
         }
 
-        cv.notify_all();
+        this->cv.notify_all();
 
         if (this->awaiting_coro)
         {
@@ -26,7 +26,9 @@ namespace usub::pg
         {
             QueryResult bad;
             bad.ok = false;
+            bad.code = PgErrorCode::InvalidFuture;
             bad.error = "invalid future";
+            bad.rows_valid = false;
             return bad;
         }
 
@@ -58,9 +60,9 @@ namespace usub::pg
             (uint32_t(src[3]) << 0);
     }
 
-    std::string parse_error(const std::vector<uint8_t>& payload)
+    PgServerErrorFields parse_error_fields(const std::vector<uint8_t>& payload)
     {
-        std::string msg;
+        PgServerErrorFields f;
         size_t i = 0;
         while (i < payload.size())
         {
@@ -70,20 +72,60 @@ namespace usub::pg
             const char* start = (const char*)&payload[i];
             size_t len = std::strlen(start);
 
-            if (!msg.empty()) msg += " | ";
-            msg += std::string(1, (char)code);
-            msg += ": ";
-            msg += std::string(start, len);
+            std::string val(start, len);
+
+            switch (code)
+            {
+            case 'S': f.severity = std::move(val);
+                break;
+            case 'C': f.sqlstate = std::move(val);
+                break;
+            case 'M': f.message = std::move(val);
+                break;
+            case 'D': f.detail = std::move(val);
+                break;
+            case 'H': f.hint = std::move(val);
+                break;
+            default: break;
+            }
 
             i += len + 1;
         }
+        return f;
+    }
 
+    std::string parse_error(const std::vector<uint8_t>& payload)
+    {
+        auto f = parse_error_fields(payload);
+
+        std::string msg;
+        if (!f.message.empty()) msg += f.message;
+        if (!f.detail.empty())
+        {
+            if (!msg.empty()) msg += " | detail: ";
+            msg += f.detail;
+        }
+        if (!f.hint.empty())
+        {
+            if (!msg.empty()) msg += " | hint: ";
+            msg += f.hint;
+        }
+        if (!f.sqlstate.empty())
+        {
+            if (!msg.empty()) msg += " | code: ";
+            msg += f.sqlstate;
+        }
         return msg;
     }
 
-    void parse_row_description(const std::vector<uint8_t>& payload,
-                               std::vector<std::string>& out_cols)
+    void parse_row_description_ex(const std::vector<uint8_t>& payload,
+                                  std::vector<std::string>& out_cols,
+                                  RowParseContext& ctx)
     {
+        ctx.ok = true;
+        ctx.code = PgErrorCode::OK;
+        ctx.msg.clear();
+
         out_cols.clear();
 
         auto rd16 = [&](size_t ofs) -> uint16_t
@@ -92,7 +134,13 @@ namespace usub::pg
         };
 
         size_t off = 0;
-        if (payload.size() < 2) return;
+        if (payload.size() < 2)
+        {
+            ctx.ok = false;
+            ctx.code = PgErrorCode::ParserTruncatedHeader;
+            ctx.msg = "row_description too short (<2)";
+            return;
+        }
 
         uint16_t nfields = rd16(off);
         off += 2;
@@ -104,28 +152,41 @@ namespace usub::pg
             size_t start = off;
             while (off < payload.size() && payload[off] != 0) off++;
 
-            std::string name;
-            if (off < payload.size())
+            if (off >= payload.size())
             {
-                name.assign((const char*)&payload[start], off - start);
-                off++; // skip 0
-            }
-            else
-            {
-                break;
+                ctx.ok = false;
+                ctx.code = PgErrorCode::ParserTruncatedHeader;
+                ctx.msg = "column name not terminated";
+                return;
             }
 
-            if (off + 18 > payload.size()) break;
+            std::string name(
+                (const char*)&payload[start],
+                off - start
+            );
+            off++;
+
+            if (off + 18 > payload.size())
+            {
+                ctx.ok = false;
+                ctx.code = PgErrorCode::ParserTruncatedHeader;
+                ctx.msg = "row_description missing fixed tail (18 bytes)";
+                return;
+            }
             off += 18;
 
             out_cols.push_back(std::move(name));
         }
-
     }
 
-    void parse_data_row(const std::vector<uint8_t>& payload,
-                        QueryResult::Row& out_row)
+    void parse_data_row_ex(const std::vector<uint8_t>& payload,
+                           QueryResult::Row& out_row,
+                           RowParseContext& ctx)
     {
+        ctx.ok = true;
+        ctx.code = PgErrorCode::OK;
+        ctx.msg.clear();
+
         auto rd16 = [&](size_t ofs) -> uint16_t
         {
             return (uint16_t(payload[ofs]) << 8) | uint16_t(payload[ofs + 1]);
@@ -136,7 +197,13 @@ namespace usub::pg
         };
 
         size_t off = 0;
-        if (payload.size() < 2) return;
+        if (payload.size() < 2)
+        {
+            ctx.ok = false;
+            ctx.code = PgErrorCode::ParserTruncatedRow;
+            ctx.msg = "data_row too short (<2)";
+            return;
+        }
 
         uint16_t ncols = rd16(off);
         off += 2;
@@ -146,8 +213,11 @@ namespace usub::pg
         {
             if (off + 4 > payload.size())
             {
+                ctx.ok = false;
+                ctx.code = PgErrorCode::ParserTruncatedField;
+                ctx.msg = "no space for field length";
                 out_row.cols.emplace_back();
-                break;
+                return;
             }
 
             int32_t col_len = (int32_t)rd32(off);
@@ -155,23 +225,35 @@ namespace usub::pg
 
             if (col_len == -1)
             {
+                // NULL
                 out_row.cols.emplace_back();
+                continue;
             }
-            else
-            {
-                if (off + (size_t)col_len > payload.size())
-                {
-                    out_row.cols.emplace_back();
-                    break;
-                }
-                out_row.cols.emplace_back(
-                    (const char*)&payload[off],
-                    (size_t)col_len
-                );
-                off += (size_t)col_len;
-            }
-        }
 
+            if (col_len < 0)
+            {
+                ctx.ok = false;
+                ctx.code = PgErrorCode::ProtocolCorrupt;
+                ctx.msg = "negative col_len";
+                out_row.cols.emplace_back();
+                return;
+            }
+
+            if (off + (size_t)col_len > payload.size())
+            {
+                ctx.ok = false;
+                ctx.code = PgErrorCode::ParserTruncatedField;
+                ctx.msg = "field overruns payload";
+                out_row.cols.emplace_back();
+                return;
+            }
+
+            out_row.cols.emplace_back(
+                (const char*)&payload[off],
+                (size_t)col_len
+            );
+            off += (size_t)col_len;
+        }
     }
 
     std::vector<uint8_t> build_startup_message(const std::string& user,
@@ -298,6 +380,5 @@ namespace usub::pg
         out.insert(out.end(), be, be + 4);
         out.insert(out.end(), sql.begin(), sql.end());
         out.push_back(0);
-
     }
 } // namespace usub::pg

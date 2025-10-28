@@ -36,7 +36,9 @@ namespace usub::pg
         this->sock_ = std::make_unique<
             usub::uvent::net::Socket<
                 usub::uvent::net::Proto::TCP,
-                usub::uvent::net::Role::ACTIVE>>(fd);
+                usub::uvent::net::Role::ACTIVE
+            >
+        >(fd);
 
         while (true)
         {
@@ -48,21 +50,30 @@ namespace usub::pg
                 co_return std::optional<std::string>{PQerrorMessage(this->conn_)};
 
             if (st == PGRES_POLLING_READING)
+            {
                 co_await wait_readable();
+            }
             else if (st == PGRES_POLLING_WRITING)
+            {
                 co_await wait_writable();
+            }
             else
-                co_await usub::uvent::system::this_coroutine::sleep_for(std::chrono::milliseconds(1));
+            {
+                co_await usub::uvent::system::this_coroutine::sleep_for(
+                    std::chrono::milliseconds(1)
+                );
+            }
         }
 
         connected_ = true;
-
         co_return std::nullopt;
     }
 
     bool PgConnectionLibpq::connected() const noexcept
     {
-        return connected_ && this->conn_ && (PQstatus(this->conn_) == CONNECTION_OK);
+        return connected_
+            && this->conn_
+            && (PQstatus(this->conn_) == CONNECTION_OK);
     }
 
     usub::uvent::task::Awaitable<QueryResult>
@@ -70,26 +81,39 @@ namespace usub::pg
     {
         QueryResult out;
         out.ok = false;
+        out.code = PgErrorCode::Unknown;
+        out.rows_valid = true;
 
         if (!connected())
         {
+            out.ok = false;
+            out.code = PgErrorCode::ConnectionClosed;
             out.error = "connection not OK";
+            out.rows_valid = false;
             co_return out;
         }
 
         if (!PQsendQuery(this->conn_, sql.c_str()))
         {
+            out.ok = false;
+            out.code = PgErrorCode::SocketReadFailed;
             out.error = PQerrorMessage(this->conn_);
+            out.rows_valid = false;
             co_return out;
         }
 
+        // flush outgoing data
         while (true)
         {
             int fr = PQflush(this->conn_);
-            if (fr == 0) break;
+            if (fr == 0)
+                break;
             if (fr == -1)
             {
+                out.ok = false;
+                out.code = PgErrorCode::SocketReadFailed;
                 out.error = PQerrorMessage(this->conn_);
+                out.rows_valid = false;
                 co_return out;
             }
             co_await wait_writable();
@@ -99,7 +123,10 @@ namespace usub::pg
         {
             if (PQconsumeInput(this->conn_) == 0)
             {
+                out.ok = false;
+                out.code = PgErrorCode::SocketReadFailed;
                 out.error = PQerrorMessage(this->conn_);
+                out.rows_valid = false;
                 co_return out;
             }
 
@@ -108,7 +135,12 @@ namespace usub::pg
                 PGresult* res = PQgetResult(this->conn_);
                 if (!res)
                 {
-                    if (out.error.empty()) out.ok = true;
+                    if (out.error.empty())
+                    {
+                        out.ok = true;
+                        out.code = PgErrorCode::OK;
+                        out.rows_valid = true;
+                    }
                     co_return out;
                 }
 
@@ -117,14 +149,18 @@ namespace usub::pg
                 {
                     int nrows = PQntuples(res);
                     int ncols = PQnfields(res);
+
                     for (int r = 0; r < nrows; r++)
                     {
                         QueryResult::Row row;
                         row.cols.reserve(ncols);
+
                         for (int c = 0; c < ncols; c++)
                         {
                             if (PQgetisnull(res, r, c))
+                            {
                                 row.cols.emplace_back();
+                            }
                             else
                             {
                                 const char* v = PQgetvalue(res, r, c);
@@ -132,18 +168,19 @@ namespace usub::pg
                                 row.cols.emplace_back(v, (size_t)len);
                             }
                         }
+
                         out.rows.push_back(std::move(row));
                     }
                 }
                 else if (st == PGRES_COMMAND_OK)
                 {
+                    out.ok = true;
+                    out.code = PgErrorCode::OK;
+                    out.rows_valid = true;
                 }
                 else
                 {
-                    const char* err = PQresultErrorMessage(res);
-                    if (err && *err)
-                        out.error = err;
-                    out.ok = false;
+                    fill_server_error_fields(res, out);
                 }
 
                 PQclear(res);
@@ -161,18 +198,23 @@ namespace usub::pg
 
     usub::uvent::task::Awaitable<void> PgConnectionLibpq::wait_readable()
     {
-        co_await usub::uvent::net::detail::AwaiterRead{this->sock_->get_raw_header()};
+        co_await usub::uvent::net::detail::AwaiterRead{
+            this->sock_->get_raw_header()
+        };
         co_return;
     }
 
     usub::uvent::task::Awaitable<void> PgConnectionLibpq::wait_writable()
     {
-        co_await usub::uvent::net::detail::AwaiterWrite{this->sock_->get_raw_header()};
+        co_await usub::uvent::net::detail::AwaiterWrite{
+            this->sock_->get_raw_header()
+        };
         co_return;
     }
 
     usub::uvent::task::Awaitable<void> PgConnectionLibpq::wait_readable_for_listener()
     {
         co_await wait_readable();
+        co_return;
     }
 }

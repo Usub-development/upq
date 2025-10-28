@@ -35,6 +35,9 @@ namespace usub::pg
             {
                 this->pool_->release_connection(this->conn_);
                 this->conn_.reset();
+                this->active_ = false;
+                this->committed_ = false;
+                this->rolled_back_ = false;
                 co_return false;
             }
         }
@@ -100,9 +103,7 @@ namespace usub::pg
         if (this->conn_ && this->conn_->connected())
         {
             QueryResult r_rb = co_await this->pool_->query_on(this->conn_, "ROLLBACK");
-            if (!r_rb.ok)
-            {
-            }
+            (void)r_rb;
         }
 
         this->committed_ = false;
