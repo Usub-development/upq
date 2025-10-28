@@ -1,50 +1,44 @@
 # Notifications (LISTEN / NOTIFY)
 
-`PgNotificationListener` subscribes to a PostgreSQL channel using `LISTEN <channel>` and delivers `NOTIFY` messages to your handler as coroutines.  
-This gives you push-style DB events without polling.
-
-This is useful for:
-- cache invalidation
-- balance updates / ledgers
-- cross-process signals ("wake worker", "reload config", etc.)
-- async domain events
+`PgNotificationListener` provides an asynchronous interface to PostgreSQL’s built-in pub/sub system via `LISTEN` and
+`NOTIFY`.  
+It allows your application to react to database events in real time — without polling or triggers.
 
 ---
-
-## Integration with webserver based on uvent can be found [here](https://github.com/Usub-development/webserver/tree/uvent302/examples/upq_integration).
 
 ## Overview
 
-```cpp
-template <class HandlerT>
-    requires PgNotifyHandler<HandlerT>
-class PgNotificationListener
-{
-public:
-    PgNotificationListener(std::string channel,
-                           std::shared_ptr<PgConnectionLibpq> conn);
+`PgNotificationListener` integrates directly with `uvent`’s coroutine runtime and `PgConnectionLibpq`.  
+It runs a dedicated event loop that blocks (asynchronously) on the socket and dispatches notifications as independent
+coroutines.
 
-    void setHandler(HandlerT h);
+Typical uses:
 
-    usub::uvent::task::Awaitable<void> run();
-};
-```
-
-High-level flow:
-
-1. You grab a dedicated PostgreSQL connection from `PgPool`.
-2. You create `PgNotificationListener(channel, conn)`.
-3. You give it a handler.
-4. You `co_await run()`.
-5. It blocks (asynchronously) and keeps dispatching notifications.
-
-The listener is single-channel. One listener == one `LISTEN <channel>`.
+- reactive cache invalidation
+- ledger and balance updates
+- cross-process coordination (`NOTIFY reload_config`)
+- reactive microservice event signaling
 
 ---
 
-## Handler contract
+## Architecture
 
-Your handler type must provide a call operator with this exact shape:
+Each listener owns **one dedicated PostgreSQL connection** obtained from `PgPool`.  
+That connection:
+
+1. Executes `LISTEN <channel>;`
+2. Waits asynchronously for socket readability (`poll/epoll` via `uvent`)
+3. Calls `PQconsumeInput()` to pull notifications
+4. Extracts messages via `PQnotifies()`
+5. Dispatches handler coroutines concurrently
+
+If the connection breaks or PostgreSQL reports `CONNECTION_BAD`, the loop exits immediately.
+
+---
+
+## Handler concept
+
+Handlers are coroutine callables that satisfy the `PgNotifyHandler` concept:
 
 ```cpp
 usub::uvent::task::Awaitable<void>
@@ -53,13 +47,15 @@ operator()(std::string channel,
            int backend_pid);
 ```
 
-* `channel`: channel name from PostgreSQL `NOTIFY`.
-* `payload`: the `NOTIFY` payload string.
-* `backend_pid`: PID of the PostgreSQL backend that sent the message.
+* `channel` — the name of the channel that emitted the notification
+* `payload` — the string payload (may be empty)
+* `backend_pid` — the PostgreSQL backend process ID that sent it
 
-The handler is awaited as a coroutine. Each notification is scheduled via `co_spawn`, so notifications are handled asynchronously and independently.
+Each notification spawns its own coroutine, so handlers run concurrently and independently.
 
-### Example handler
+---
+
+## Example: basic listener
 
 ```cpp
 struct MyNotifyHandler
@@ -72,241 +68,176 @@ struct MyNotifyHandler
         std::cout
             << "[NOTIFY] channel=" << channel
             << " pid=" << backend_pid
-            << " payload=" << payload
-            << std::endl;
-
-        // You can run DB queries here if you want to react.
-        auto& pool = usub::pg::PgPool::instance();
-
-        auto res = co_await pool.query_awaitable(
-            "SELECT id, name FROM users WHERE id = $1;",
-            1
-        );
-
-        if (res.ok && !res.rows.empty())
-        {
-            std::cout
-                << "reactive fetch -> id="   << res.rows[0].cols[0]
-                << ", name="                 << res.rows[0].cols[1]
-                << std::endl;
-        }
-        else
-        {
-            std::cout
-                << "reactive fetch fail: "
-                << res.error
-                << std::endl;
-        }
+            << " payload=" << payload << std::endl;
 
         co_return;
     }
 };
 ```
 
-This satisfies the `PgNotifyHandler` concept and matches how the listener actually calls the handler.
-
----
-
-## Creating and running a listener
-
-### 1. Get a dedicated connection from the pool
-
-You should not use a "borrowed for one query" connection here. You keep this connection for as long as you're listening.
+Setup and run:
 
 ```cpp
 auto& pool = usub::pg::PgPool::instance();
 auto conn = co_await pool.acquire_connection();
 
-if (!conn || !conn->connected())
-{
-    std::cout << "listener: connection unavailable\n";
+if (!conn || !conn->connected()) {
+    std::cout << "Cannot initialize listener\n";
     co_return;
 }
-```
 
-Why dedicated?
-Because this connection will sit in a loop waiting for notifications. You don't want to return it to the pool between events.
-
----
-
-### 2. Create the listener and attach the handler
-
-```cpp
-usub::pg::PgNotificationListener<MyNotifyHandler> listener(
-    "events",  // PostgreSQL channel name
-    conn       // shared_ptr<PgConnectionLibpq>
-);
-
+usub::pg::PgNotificationListener<MyNotifyHandler> listener("events", conn);
 listener.setHandler(MyNotifyHandler{});
-```
 
-At runtime this will execute:
-
-```sql
-LISTEN events;
-```
-
-If that initial `LISTEN` fails, the listener stops immediately.
-
----
-
-### 3. Start the loop
-
-```cpp
 co_await listener.run();
 ```
 
-`run()`:
+---
+
+## Behavior
+
+When `run()` starts:
 
 1. Executes `LISTEN <channel>;`
-2. Enters an infinite async loop:
-    * waits for the socket to become readable using `wait_readable_for_listener()`
-    * calls `PQconsumeInput(raw_conn)` to pull pending messages from the server
-    * repeatedly calls `PQnotifies(raw_conn)` to drain all notifications
-    * for each notification, schedules your handler via `co_spawn`
+2. If successful, enters an infinite asynchronous loop:
 
-When the connection becomes invalid or `PQconsumeInput()` reports `CONNECTION_BAD`, `run()` returns and the listener stops.
+    * Waits for socket readiness using `wait_readable_for_listener()`
+    * Calls `PQconsumeInput()` to fetch messages
+    * Calls `PQnotifies()` repeatedly to drain all pending notifications
+    * For each notification, calls `dispatch_async(handler)`
 
----
-
-## Full example
-
-A realistic bootstrap coroutine that subscribes to `"events"` and runs forever:
-
-```cpp
-usub::uvent::task::Awaitable<void> start_notifications()
-{
-    auto& pool = usub::pg::PgPool::instance();
-    auto conn = co_await pool.acquire_connection();
-
-    if (!conn || !conn->connected())
-    {
-        std::cout << "cannot init notification listener\n";
-        co_return;
-    }
-
-    usub::pg::PgNotificationListener<MyNotifyHandler> listener(
-        "events",
-        conn
-    );
-
-    listener.setHandler(MyNotifyHandler{});
-
-    // This call will not return under normal operation.
-    // It returns only if the connection dies or becomes invalid.
-    co_await listener.run();
-
-    // If run() exits, you can optionally release the connection:
-    pool.release_connection(conn);
-
-    co_return;
-}
-```
-
-You typically spawn this once during service startup:
-
-```cpp
-usub::uvent::system::co_spawn(
-    start_notifications()
-);
-```
-
-After that, any `NOTIFY events, 'payload'` from Postgres will trigger `MyNotifyHandler`.
+If connection loss or protocol error occurs, the loop terminates cleanly.
 
 ---
 
-## Internals / behavior details
-
-Below is what `PgNotificationListener` actually does (simplified from the code you provided):
+## Example: reactive logic
 
 ```cpp
-usub::uvent::task::Awaitable<void> run()
+struct BalanceUpdateHandler
 {
-    if (!conn_ || !conn_->connected())
-        co_return;
-
-    // Step 1: LISTEN <channel>;
+    usub::uvent::task::Awaitable<void>
+    operator()(std::string channel,
+               std::string payload,
+               int pid)
     {
-        std::string listen_sql = "LISTEN " + channel_ + ";";
-        QueryResult qr = co_await conn_->exec_simple_query_nonblocking(listen_sql);
-        if (!qr.ok)
-            co_return; // can't subscribe, stop
-    }
+        std::cout << "[NOTIFY] " << channel << ": " << payload << "\n";
 
-    // Step 2: main loop
+        // Reactively query database
+        auto& pool = usub::pg::PgPool::instance();
+        auto res = co_await pool.query_awaitable(
+            "SELECT id, balance FROM users WHERE id = $1;",
+            std::stoi(payload)
+        );
+
+        if (!res.ok)
+            std::cout << "Reactive fetch failed: " << res.error << "\n";
+        else
+            std::cout << "Updated balance = " << res.rows[0].cols[1] << "\n";
+
+        co_return;
+    }
+};
+```
+
+---
+
+## Dedicated connection
+
+Listeners **must** hold a dedicated connection.
+A `LISTEN` session cannot be multiplexed with normal queries.
+
+Always obtain and keep a connection manually:
+
+```cpp
+auto conn = co_await pool.acquire_connection();
+```
+
+Never use `query_awaitable()` inside the same connection — use the pool’s singleton for secondary queries.
+
+---
+
+## Error transparency (since v1.0.1)
+
+All listener failures now surface as structured logs with `PgErrorCode` mapping.
+
+| Type               | Example                                                                     |
+|--------------------|-----------------------------------------------------------------------------|
+| Connection invalid | `[NOTIFY][ERROR] code=2 msg=connection invalid at start`                    |
+| LISTEN failed      | `[NOTIFY][ERROR] LISTEN failed code=8 sqlstate=42501 msg=permission denied` |
+| Socket read failed | `[NOTIFY][WARN] code=3 msg=PQconsumeInput failed: connection reset`         |
+| Connection closed  | `[NOTIFY][ERROR] code=2 msg=CONNECTION_BAD`                                 |
+| No handler         | `[NOTIFY][INFO] channel=events payload=... pid=1234 (no handler set)`       |
+
+Each code corresponds to a `PgErrorCode` value:
+
+* `ConnectionClosed` — underlying PGconn invalid or socket dropped
+* `ServerError` — PostgreSQL rejected the `LISTEN` command
+* `SocketReadFailed` — I/O failure during `PQconsumeInput`
+* `Unknown` — unexpected condition
+
+These logs make listener health observable and simplify restart logic in supervising coroutines.
+
+---
+
+## Concurrency and safety
+
+* Multiple listeners can run concurrently on different channels.
+* Each listener owns exactly one connection.
+* Handler invocations are isolated coroutines — slow handlers do not block new notifications.
+* Handlers can run nested queries through the global pool safely.
+
+---
+
+## Recovery pattern
+
+You can detect listener termination and restart it automatically:
+
+```cpp
+usub::uvent::task::Awaitable<void> run_forever()
+{
     while (true)
     {
-        // block (asynchronously) until socket is readable
-        co_await conn_->wait_readable_for_listener();
-
-        PGconn* raw = conn_->raw_conn();
-        if (!raw)
-            co_return;
-
-        // pull data from libpq
-        if (PQconsumeInput(raw) == 0)
-        {
-            // check if connection is broken
-            if (PQstatus(raw) == CONNECTION_BAD)
-                co_return;
-
+        auto& pool = usub::pg::PgPool::instance();
+        auto conn = co_await pool.acquire_connection();
+        if (!conn || !conn->connected()) {
+            co_await usub::uvent::system::this_coroutine::sleep_for(1s);
             continue;
         }
 
-        // drain all pending notifications
-        while (true)
-        {
-            PGnotify* n = PQnotifies(raw);
-            if (!n)
-                break;
+        usub::pg::PgNotificationListener<MyNotifyHandler> listener("events", conn);
+        listener.setHandler(MyNotifyHandler{});
+        co_await listener.run();
 
-            const char* ch_raw = n->relname ? n->relname : "";
-            const char* pl_raw = n->extra  ? n->extra  : "";
-            int be_pid = n->be_pid;
-
-            if (has_handler_)
-                dispatch_async(ch_raw, pl_raw, be_pid);
-
-            PQfreemem(n);
-        }
+        pool.release_connection(conn);
+        std::cout << "Listener stopped — restarting\n";
     }
-
-    co_return;
 }
 ```
 
-Key points:
-
-* It's event-driven. No polling delays, no sleep.
-* It never blocks the thread. Waiting is done via `uvent` (`wait_readable_for_listener()`).
-* Every notification is handed off using `dispatch_async(...)`, which internally does `co_spawn` on a new coroutine so that handler logic doesn't backpressure the listener.
+This provides resilience against connection loss or PostgreSQL restarts.
 
 ---
 
-## Notes / limitations
+## Notes & limitations
 
-* One listener listens to exactly one channel string given in constructor.
-  If you want multiple channels: make multiple listeners, or extend the code to run more than one `LISTEN ...;`.
+* One listener == one channel.
+  To listen on multiple channels, spawn multiple listeners.
 
-* There is no automatic reconnect / re-LISTEN if the connection dies. You own the lifecycle. Usual pattern is:
+* No automatic reconnection — you control lifecycle.
 
-    * detect exit of `run()`
-    * log it
-    * spawn a new listener with a fresh connection if you care about resilience
+* Handler copies are spawned per event; keep captures small and stateless.
 
-* The listener assumes the same `PGconn` is held for its entire lifetime. Do not `release_connection()` while `run()` is active.
-
-* Handler is copied before dispatch. That means:
-
-    * captures need to be cheap or at least copyable,
-    * you can safely mutate shared state via globals/singletons (like `PgPool::instance()`), but don't rely on handler object mutating its own internal state across calls unless you understand you're mutating *the copy*.
+* If your handler throws, the coroutine terminates silently — prefer returning error via logs or metrics.
 
 ---
 
-## TL;DR
+## Design philosophy
 
-* Grab connection from pool
-* Build `PgNotificationListener("channel", conn)`
-* `setHandler(MyNotifyHandler{})`
-* `co_await listener.run()` in a background coroutine
-* Every `NOTIFY channel, 'payload'` in Postgres hits your handler as its own coroutine
+`PgNotificationListener` aims for:
+
+* **Zero polling:** pure event-driven design.
+* **Low latency:** direct socket wake-ups via `uvent`.
+* **No thread blocking:** fully coroutine-based I/O.
+* **Transparent errors:** no hidden disconnects or silent failures.
+
+This makes it suitable for reactive systems, message routers, or cross-service synchronization built on PostgreSQL.

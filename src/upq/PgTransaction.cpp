@@ -134,4 +134,30 @@ namespace usub::pg
         co_await rollback();
         co_return;
     }
+
+    usub::uvent::task::Awaitable<void> PgTransaction::abort()
+    {
+        if (!this->active_)
+        {
+            co_return;
+        }
+
+        if (this->conn_ && this->conn_->connected())
+        {
+            QueryResult r_rb = co_await this->pool_->query_on(this->conn_, "ABORT");
+            (void)r_rb;
+        }
+
+        this->committed_ = false;
+        this->rolled_back_ = true;
+        this->active_ = false;
+
+        if (this->conn_)
+        {
+            this->pool_->release_connection(this->conn_);
+            this->conn_.reset();
+        }
+
+        co_return;
+    }
 } // namespace usub::pg
