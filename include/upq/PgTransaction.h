@@ -33,6 +33,8 @@ namespace usub::pg
 
         usub::uvent::task::Awaitable<void> finish();
 
+        usub::uvent::task::Awaitable<void> abort();
+
         bool is_active() const noexcept { return active_; }
         bool is_committed() const noexcept { return committed_; }
         bool is_rolled_back() const noexcept { return rolled_back_; }
