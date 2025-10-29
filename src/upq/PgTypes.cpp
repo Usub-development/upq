@@ -23,6 +23,26 @@ namespace usub::pg
         }
     }
 
+    void QueryState::set_canceled(PgErrorCode code, std::string msg)
+    {
+        {
+            std::lock_guard lk(this->mtx);
+            this->canceled.store(true, std::memory_order_release);
+            this->cancel_code = code;
+            this->cancel_reason = std::move(msg);
+            this->ready.store(true, std::memory_order_release);
+        }
+
+        this->cv.notify_all();
+
+        if (this->awaiting_coro)
+        {
+            auto h = this->awaiting_coro;
+            this->awaiting_coro = nullptr;
+            h.resume();
+        }
+    }
+
     QueryResult QueryFuture::wait()
     {
         if (!this->state)
@@ -68,7 +88,6 @@ namespace usub::pg
         if (sqlstate.size() < 2)
             return PgSqlStateClass::Other;
 
-        // specific first:
         if (sqlstate == "23505") return PgSqlStateClass::UniqueViolation;
         if (sqlstate == "23514") return PgSqlStateClass::CheckViolation;
         if (sqlstate == "23502") return PgSqlStateClass::NotNullViolation;
@@ -259,7 +278,6 @@ namespace usub::pg
 
             if (col_len == -1)
             {
-                // NULL
                 out_row.cols.emplace_back();
                 continue;
             }

@@ -52,7 +52,7 @@ namespace usub::pg
                 this->stats_.failed_checks.fetch_add(1, std::memory_order_relaxed);
             }
 
-            this->pool_.release_connection(conn);
+            co_await this->pool_.release_connection_async(conn);
 
             co_await usub::uvent::system::this_coroutine::sleep_for(
                 std::chrono::milliseconds(interval)

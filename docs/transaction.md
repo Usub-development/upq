@@ -1,166 +1,213 @@
 # PgTransaction
 
-`PgTransaction` provides coroutine-safe transaction management on top of `PgPool`.  
-It wraps a single connection and supports `BEGIN`, `COMMIT`, `ROLLBACK`, and `ABORT` with full error transparency.
+`PgTransaction` provides coroutine-friendly transactional access to PostgreSQL.
+
+It:
+
+- Acquires a dedicated connection from `PgPool`
+- Sends `BEGIN` with optional isolation / read-only / deferrable settings
+- Executes multiple queries on the same connection
+- Commits or rolls back
+- Returns (or retires) the connection back to the pool
+
+All operations are async and return `Awaitable<...>`.
 
 ---
 
-## Overview
-
-Each transaction owns one dedicated connection from the pool.  
-All operations (`BEGIN`, `COMMIT`, `ROLLBACK`, `ABORT`) are asynchronous and return structured `QueryResult` or `bool`.
-
-After the transaction ends (committed, rolled back, or aborted), the connection is automatically released back to the
-pool.
-
----
-
-## Example
+## Basic usage
 
 ```cpp
-#include "upq/PgTransaction.h"
-
-using namespace usub;
-
-uvent::task::Awaitable<void> transfer_example()
+task::Awaitable<void> do_transfer()
 {
-    pg::PgTransaction txn;
+    usub::pg::PgTransaction txn;
 
-    if (!co_await txn.begin())
+    bool ok_begin = co_await txn.begin();
+    if (!ok_begin)
     {
-        std::cout << "Transaction begin failed\n";
-        co_await txn.finish();
+        std::cout << "[ERROR] BEGIN failed\n";
         co_return;
     }
 
-    auto res = co_await txn.query(
-        "UPDATE users SET balance = balance - $1 WHERE id = $2 RETURNING balance;",
-        100.0, 42
+    auto r1 = co_await txn.query(
+        "UPDATE accounts SET balance = balance - $1 WHERE id = $2 RETURNING balance;",
+        100, 1
     );
 
-    if (!res.ok)
+    auto r2 = co_await txn.query(
+        "UPDATE accounts SET balance = balance + $1 WHERE id = $2 RETURNING balance;",
+        100, 2
+    );
+
+    if (!r1.ok || !r2.ok)
     {
-        std::cout << "Query failed: " << res.error << "\n";
-        co_await txn.abort(); // soft abort instead of rollback
-        co_await txn.finish();
+        std::cout << "[ERROR] transfer failed, rolling back\n";
+        co_await txn.rollback();
         co_return;
     }
 
-    if (!co_await txn.commit())
+    bool ok_commit = co_await txn.commit();
+    if (!ok_commit)
     {
-        std::cout << "Commit failed — aborting\n";
-        co_await txn.abort();
+        std::cout << "[ERROR] COMMIT failed\n";
+        co_return;
     }
 
-    co_await txn.finish();
+    std::cout << "[OK] transfer complete\n";
     co_return;
 }
 ```
 
 ---
 
-## API summary
+## Transaction config
 
-| Method                | Description                                       |
-|-----------------------|---------------------------------------------------|
-| `begin()`             | Starts a new transaction (`BEGIN`).               |
-| `query(sql, args...)` | Executes a query within the active transaction.   |
-| `commit()`            | Commits the transaction (`COMMIT`).               |
-| `rollback()`          | Performs an explicit rollback (`ROLLBACK`).       |
-| `abort()`             | Performs a soft abort (`ABORT` if connected).     |
-| `finish()`            | Ensures cleanup; calls `abort()` if still active. |
+You can control isolation level, read-only mode, and deferrable mode:
+
+```cpp
+usub::pg::PgTransactionConfig cfg{
+    .isolation   = usub::pg::TxIsolationLevel::Serializable,
+    .read_only   = false,
+    .deferrable  = false
+};
+
+usub::pg::PgTransaction txn(&usub::pg::PgPool::instance(), cfg);
+bool ok_begin = co_await txn.begin();
+```
+
+Generated `BEGIN` looks like:
+
+* isolation level:
+
+    * `READ COMMITTED`
+    * `REPEATABLE READ`
+    * `SERIALIZABLE`
+* mode: `READ WRITE` or `READ ONLY`
+* optionally `DEFERRABLE`
 
 ---
 
-## `abort()`
-
-`abort()` safely terminates a transaction using a lightweight approach.
-
-* If the connection is alive, sends the PostgreSQL command `ABORT`
-  (an alias of `ROLLBACK`).
-* If the connection is already broken, marks the transaction as rolled back
-  and releases the connection locally.
-
-Used when:
-
-* Coroutine cancelled mid-transaction
-* Connection lost (`ConnectionClosed`)
-* You want to discard transaction without waiting for a full rollback
+## Querying inside a transaction
 
 ```cpp
-if (res.code == PgErrorCode::ConnectionClosed)
+auto qr = co_await txn.query(
+    "UPDATE users SET name = $1 WHERE id = $2 RETURNING name;",
+    "John", 1
+);
+
+if (!qr.ok)
 {
-    std::cout << "Connection lost — aborting transaction\n";
-    co_await txn.abort();
-    co_await txn.finish();
+    std::cout << "[ERROR] update failed: " << qr.error << "\n";
+    co_await txn.rollback();
     co_return;
 }
 ```
 
+* `txn.query(...)` calls `PgPool::query_on()` on the same pinned connection.
+* You always read the result via standard `QueryResult`.
+
+If the underlying connection is dropped mid-transaction (e.g. network failure), `txn.query()` returns with:
+
+* `ok = false`
+* `code = PgErrorCode::ConnectionClosed`
+  and the transaction is automatically marked inactive.
+
 ---
 
-## Error propagation
-
-Transactions propagate structured errors with `PgErrorCode`:
-
-| Condition            | `PgErrorCode`      | Notes                          |
-|----------------------|--------------------|--------------------------------|
-| Inactive transaction | `InvalidFuture`    | No `BEGIN` or already finished |
-| Connection dropped   | `ConnectionClosed` | Socket or PGconn lost mid-txn  |
-| Server-side error    | `ServerError`      | SQLSTATE and details available |
-| Commit failure       | `ServerError`      | COMMIT rejected or timed out   |
-| Abort failure        | `SocketReadFailed` | Connection failed during abort |
-
-Example:
+## Commit / rollback
 
 ```cpp
-auto res = co_await txn.query("UPDATE accounts SET ...;");
-if (!res.ok) {
-    std::cout
-        << "[TXN ERROR] code=" << (uint32_t)res.code
-        << " msg=" << res.error
-        << " sqlstate=" << res.server_sqlstate << std::endl;
+bool ok_commit = co_await txn.commit();
+if (!ok_commit)
+    std::cout << "[ERROR] commit failed\n";
+```
+
+```cpp
+co_await txn.rollback();
+```
+
+There is also:
+
+```cpp
+co_await txn.abort();   // uses ABORT instead of ROLLBACK
+co_await txn.finish();  // "best effort cleanup": rollback if still active
+```
+
+---
+
+## Connection handoff back to the pool
+
+Internally, `PgTransaction` uses a dedicated connection (acquired via `PgPool::acquire_connection()`).
+
+When the transaction ends (`commit`, `rollback`, `finish`, `abort`):
+
+* It calls `PgPool::release_connection_async(conn)`.
+
+`release_connection_async` is important:
+
+* It *awaits* internal cleanup on that connection.
+* It drains any remaining `PGresult`s from libpq.
+* Only after the connection is known to be idle/clean, it is re-queued into the pool for reuse.
+
+If the connection is already in a bad state (disconnected, protocol error, etc.), the pool will not recycle it — it will
+retire it and decrement `live_count_`. The object will eventually be destroyed (closing the socket, calling `PQfinish`).
+
+This design guarantees:
+
+* A transaction will never return a “dirty” connection to the pool.
+* No other coroutine will later see `"another command is already in progress"` because of leftover results from your
+  transaction, COMMIT, or ROLLBACK.
+
+---
+
+## Subtransactions (SAVEPOINT)
+
+`PgTransaction` supports savepoints for partial rollback:
+
+```cpp
+auto sub = txn.make_subtx();
+
+bool ok_sub_begin = co_await sub.begin();
+if (!ok_sub_begin)
+{
+    std::cout << "[ERROR] SAVEPOINT begin failed\n";
+    // still inside main txn, but subtx didn't start
+}
+
+auto r_inner = co_await sub.query(
+    "UPDATE ledger SET amount = amount + $1 WHERE id = $2 RETURNING amount;",
+    500, 42
+);
+
+if (!r_inner.ok)
+{
+    std::cout << "[WARN] inner update failed, rolling back subtx\n";
+    co_await sub.rollback();
+}
+else
+{
+    bool ok_sub_commit = co_await sub.commit();
+    if (!ok_sub_commit)
+        std::cout << "[WARN] subtx commit failed\n";
 }
 ```
 
----
+Semantics:
 
-## `finish()`
+* `begin()` issues `SAVEPOINT <name>`
+* `commit()` issues `RELEASE SAVEPOINT <name>`
+* `rollback()` issues `ROLLBACK TO SAVEPOINT <name>`
 
-`finish()` finalizes the transaction and always returns the connection to the pool.
-If the transaction is still active, it automatically calls `abort()`.
-
-This means you can safely call `finish()` in every exit path:
-
-```cpp
-pg::PgTransaction txn;
-if (!co_await txn.begin()) co_return;
-
-// ...
-
-co_await txn.finish(); // always safe
-```
+All these run on the same underlying `PGconn`.
 
 ---
 
-## Lifecycle
+## Summary
 
-| Stage    | Method       | Description                                    |
-|----------|--------------|------------------------------------------------|
-| Start    | `begin()`    | Sends `BEGIN;` and marks active                |
-| Execute  | `query()`    | Runs statements on same connection             |
-| Commit   | `commit()`   | Sends `COMMIT;`                                |
-| Abort    | `abort()`    | Sends `ABORT;` or marks rolled back            |
-| Rollback | `rollback()` | Sends `ROLLBACK;` explicitly                   |
-| Finish   | `finish()`   | Releases connection (uses `abort()` if active) |
-
----
-
-## Design intent
-
-`abort()` fills the gap between graceful rollback and hard disconnect recovery.
-It lets coroutines cancel transactions fast and deterministically without waiting for PostgreSQL response in broken or
-cancelled states.
-
-`finish()` now consistently defers to `abort()` for safe cleanup,
-making the transaction API idempotent and fault-tolerant.
+| Feature                     | Description                                                    |
+|-----------------------------|----------------------------------------------------------------|
+| Dedicated connection        | Each `PgTransaction` pins one physical connection              |
+| Async begin/commit/rollback | All blocking points are coroutine suspension                   |
+| Safe return to pool         | Connection is drained via `release_connection_async`           |
+| Automatic invalidation      | Lost connection marks the transaction as rolled back           |
+| Subtransactions (SAVEPOINT) | Fine-grained rollback without aborting the parent transaction  |
+| Structured results          | All queries return `QueryResult` with `ok`, `code`, `error`, … |

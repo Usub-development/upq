@@ -133,7 +133,7 @@ namespace usub::pg
             this->rolled_back_ = true;
             this->committed_ = false;
 
-            this->pool_->release_connection(this->conn_);
+            co_await this->pool_->release_connection_async(this->conn_);
             this->conn_.reset();
 
             co_return bad;
