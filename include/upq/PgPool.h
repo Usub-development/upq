@@ -16,6 +16,14 @@
 
 namespace usub::pg
 {
+    struct PgPoolHealthConfig
+    {
+        bool enabled{false};
+        uint64_t interval_ms{600000};
+    };
+
+    class PgHealthChecker;
+
     class PgPool
     {
     public:
@@ -25,7 +33,8 @@ namespace usub::pg
                std::string db,
                std::string password,
                size_t max_pool_size = 32,
-               size_t queue_capacity = 64);
+               size_t queue_capacity = 64,
+               PgPoolHealthConfig health_cfg = {});
 
         static void init_global(const std::string& host,
                                 const std::string& port,
@@ -33,7 +42,8 @@ namespace usub::pg
                                 const std::string& db,
                                 const std::string& password,
                                 size_t max_pool_size = 32,
-                                size_t queue_capacity = 64);
+                                size_t queue_capacity = 64,
+                                PgPoolHealthConfig health_cfg = {});
 
         static PgPool& instance();
 
@@ -52,30 +62,26 @@ namespace usub::pg
         usub::uvent::task::Awaitable<QueryResult>
         query_awaitable(const std::string& sql, Args&&... args);
 
-        inline std::string host()
-        {
-            return this->host_;
-        }
+        inline std::string host() { return this->host_; }
+        inline std::string port() { return this->port_; }
+        inline std::string user() { return this->user_; }
+        inline std::string db() { return this->db_; }
+        inline std::string password() { return this->password_; }
 
-        inline std::string port()
-        {
-            return this->port_;
-        }
+        inline PgPoolHealthConfig health_cfg() const { return this->health_cfg_; }
 
-        inline std::string user()
-        {
-            return this->user_;
-        }
+        PgHealthChecker& health_checker();
 
-        inline std::string db()
-        {
-            return this->db_;
-        }
+        void mark_dead(std::shared_ptr<PgConnectionLibpq> const& conn);
 
-        inline std::string password()
+        struct HealthStats
         {
-            return this->password_;
-        }
+            std::atomic<uint64_t> checked{0};
+            std::atomic<uint64_t> alive{0};
+            std::atomic<uint64_t> reconnected{0};
+        };
+
+        inline HealthStats& health_stats() { return stats_; }
 
     private:
         std::string host_;
@@ -88,6 +94,12 @@ namespace usub::pg
 
         size_t max_pool_;
         std::atomic<size_t> live_count_;
+
+        PgPoolHealthConfig health_cfg_;
+
+        HealthStats stats_;
+
+        std::unique_ptr<PgHealthChecker> health_checker_;
 
         static std::unique_ptr<PgPool> instance_;
     };
@@ -138,7 +150,6 @@ namespace usub::pg
         release_connection(conn);
         co_return qr;
     }
-
 } // namespace usub::pg
 
 #endif // PGPOOL_H

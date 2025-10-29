@@ -1,4 +1,5 @@
 #include "upq/PgPool.h"
+#include "upq/PgHealthChecker.h"
 #include <cstdlib>
 
 namespace usub::pg
@@ -11,7 +12,8 @@ namespace usub::pg
                    std::string db,
                    std::string password,
                    size_t max_pool_size,
-                   size_t queue_capacity)
+                   size_t queue_capacity,
+                   PgPoolHealthConfig health_cfg)
         : host_(std::move(host))
           , port_(std::move(port))
           , user_(std::move(user))
@@ -20,7 +22,15 @@ namespace usub::pg
           , idle_(queue_capacity)
           , max_pool_(max_pool_size)
           , live_count_(0)
+          , health_cfg_(health_cfg)
+          , stats_{}
     {
+        health_checker_ = std::make_unique<PgHealthChecker>(*this, health_cfg);
+
+        if (health_cfg.enabled)
+        {
+            usub::uvent::system::co_spawn(health_checker_->run());
+        }
     }
 
     void PgPool::init_global(const std::string& host,
@@ -29,7 +39,8 @@ namespace usub::pg
                              const std::string& db,
                              const std::string& password,
                              size_t max_pool_size,
-                             size_t queue_capacity)
+                             size_t queue_capacity,
+                             PgPoolHealthConfig health_cfg)
     {
         if (instance_)
         {
@@ -44,7 +55,8 @@ namespace usub::pg
                 db,
                 password,
                 max_pool_size,
-                queue_capacity
+                queue_capacity,
+                health_cfg
             )
         );
     }
@@ -56,6 +68,11 @@ namespace usub::pg
             std::abort();
         }
         return *instance_;
+    }
+
+    PgHealthChecker& PgPool::health_checker()
+    {
+        return *health_checker_;
     }
 
     usub::uvent::task::Awaitable<std::shared_ptr<PgConnectionLibpq>>
@@ -108,7 +125,7 @@ namespace usub::pg
                 }
             }
 
-            co_await uvent::system::this_coroutine::sleep_for(100us);
+            co_await usub::uvent::system::this_coroutine::sleep_for(100us);
         }
     }
 
@@ -127,5 +144,13 @@ namespace usub::pg
         {
             this->live_count_.fetch_sub(1, std::memory_order_relaxed);
         }
+    }
+
+    void PgPool::mark_dead(std::shared_ptr<PgConnectionLibpq> const& conn)
+    {
+        if (!conn)
+            return;
+
+        this->live_count_.fetch_sub(1, std::memory_order_relaxed);
     }
 } // namespace usub::pg
