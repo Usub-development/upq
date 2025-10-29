@@ -38,6 +38,36 @@ namespace usub::pg
         Unknown
     };
 
+    // High-level server-side error classification, derived from SQLSTATE.
+    enum class PgSqlStateClass : uint8_t
+    {
+        None = 0, // no sqlstate / not an error
+        ConnectionError, // 08***, connection failures etc.
+        SyntaxError, // 42*** (syntax/access rule)
+        UndefinedObject, // e.g. 42P01 (relation does not exist)
+        ConstraintViolation, // 23*** generic integrity violation
+        UniqueViolation, // 23505
+        CheckViolation, // 23514
+        NotNullViolation, // 23502
+        ForeignKeyViolation, // 23503
+        Deadlock, // 40P01
+        SerializationFailure, // 40001
+        PrivilegeError, // 42501 / 28***
+        DataException, // 22***
+        TransactionState, // 25*** / 40*** rollback
+        InternalError, // XX***
+        Other // fallback
+    };
+
+    struct PgErrorDetail
+    {
+        std::string sqlstate;
+        std::string message;
+        std::string detail;
+        std::string hint;
+        PgSqlStateClass category{PgSqlStateClass::None};
+    };
+
     struct QueryResult
     {
         struct Row
@@ -46,12 +76,14 @@ namespace usub::pg
         };
 
         std::vector<Row> rows;
+
         bool ok{false};
         PgErrorCode code{PgErrorCode::Unknown};
+
         std::string error;
-        std::string server_sqlstate;
-        std::string server_detail;
-        std::string server_hint;
+
+        PgErrorDetail err_detail;
+
         bool rows_valid{true};
     };
 
@@ -159,6 +191,9 @@ namespace usub::pg
         bool ok{false};
         PgWireError err;
     };
+
+    // classify SQLSTATE string ("23505", "40P01", etc.) into PgSqlStateClass
+    PgSqlStateClass classify_sqlstate(std::string_view sqlstate);
 
     template <class Socket>
     uvent::task::Awaitable<PgWireResult<void>>

@@ -38,19 +38,12 @@ namespace usub::pg
         {
             if (!this->conn_ || !this->conn_->connected())
             {
-                QueryResult fail;
-                fail.ok = false;
-                fail.code = PgErrorCode::ConnectionClosed;
-                fail.error = "PgNotificationListener: connection invalid at start";
-                fail.rows_valid = false;
-
                 co_return;
             }
 
             {
                 std::string listen_sql = "LISTEN " + this->channel_ + ";";
                 QueryResult qr = co_await this->conn_->exec_simple_query_nonblocking(listen_sql);
-
                 if (!qr.ok)
                 {
                     co_return;
@@ -64,51 +57,22 @@ namespace usub::pg
                 PGconn* raw = this->conn_->raw_conn();
                 if (!raw)
                 {
-                    QueryResult fail;
-                    fail.ok = false;
-                    fail.code = PgErrorCode::ConnectionClosed;
-                    fail.error = "PgNotificationListener: raw_conn() == nullptr";
-                    fail.rows_valid = false;
-
                     co_return;
                 }
 
                 if (PQconsumeInput(raw) == 0)
                 {
-                    const char* emsg = PQerrorMessage(raw);
-
                     if (PQstatus(raw) == CONNECTION_BAD)
                     {
-                        QueryResult fail;
-                        fail.ok = false;
-                        fail.code = PgErrorCode::ConnectionClosed;
-                        fail.error = (emsg && *emsg)
-                                         ? std::string("CONNECTION_BAD: ") + emsg
-                                         : "CONNECTION_BAD";
-                        fail.rows_valid = false;
-
                         co_return;
                     }
-
-                    {
-                        QueryResult warn;
-                        warn.ok = false;
-                        warn.code = PgErrorCode::SocketReadFailed;
-                        warn.error = (emsg && *emsg)
-                                         ? std::string("PQconsumeInput failed: ") + emsg
-                                         : "PQconsumeInput failed";
-                        warn.rows_valid = false;
-
-                    }
-
                     continue;
                 }
 
                 while (true)
                 {
                     PGnotify* n = PQnotifies(raw);
-                    if (!n)
-                        break;
+                    if (!n) break;
 
                     const char* ch_raw = n->relname ? n->relname : "";
                     const char* pl_raw = n->extra ? n->extra : "";
@@ -170,6 +134,6 @@ namespace usub::pg
         HandlerT handler_{};
         bool has_handler_{false};
     };
-} // namespace usub::pg
+}
 
 #endif // PGNOTIFICATIONLISTENER_H

@@ -1,5 +1,8 @@
 #include "upq/PgTypes.h"
 
+#include <cstring>
+#include <cstdlib>
+
 namespace usub::pg
 {
     void QueryState::set_result(QueryResult&& r)
@@ -58,6 +61,37 @@ namespace usub::pg
             (uint32_t(src[1]) << 16) |
             (uint32_t(src[2]) << 8) |
             (uint32_t(src[3]) << 0);
+    }
+
+    PgSqlStateClass classify_sqlstate(std::string_view sqlstate)
+    {
+        if (sqlstate.size() < 2)
+            return PgSqlStateClass::Other;
+
+        // specific first:
+        if (sqlstate == "23505") return PgSqlStateClass::UniqueViolation;
+        if (sqlstate == "23514") return PgSqlStateClass::CheckViolation;
+        if (sqlstate == "23502") return PgSqlStateClass::NotNullViolation;
+        if (sqlstate == "23503") return PgSqlStateClass::ForeignKeyViolation;
+
+        if (sqlstate == "40P01") return PgSqlStateClass::Deadlock;
+        if (sqlstate == "40001") return PgSqlStateClass::SerializationFailure;
+
+        if (sqlstate == "42501") return PgSqlStateClass::PrivilegeError;
+        if (sqlstate == "42P01") return PgSqlStateClass::UndefinedObject;
+
+        std::string_view cls = sqlstate.substr(0, 2);
+
+        if (cls == "08") return PgSqlStateClass::ConnectionError; // connection exception
+        if (cls == "22") return PgSqlStateClass::DataException; // data exception
+        if (cls == "23") return PgSqlStateClass::ConstraintViolation; // integrity constraint violation
+        if (cls == "25") return PgSqlStateClass::TransactionState; // invalid txn state
+        if (cls == "28") return PgSqlStateClass::PrivilegeError; // invalid auth spec
+        if (cls == "40") return PgSqlStateClass::TransactionState; // txn rollback
+        if (cls == "42") return PgSqlStateClass::SyntaxError; // syntax/access rule violation
+        if (cls == "XX") return PgSqlStateClass::InternalError; // internal error
+
+        return PgSqlStateClass::Other;
     }
 
     PgServerErrorFields parse_error_fields(const std::vector<uint8_t>& payload)

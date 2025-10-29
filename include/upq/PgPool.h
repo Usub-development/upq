@@ -52,6 +52,31 @@ namespace usub::pg
         usub::uvent::task::Awaitable<QueryResult>
         query_awaitable(const std::string& sql, Args&&... args);
 
+        inline std::string host()
+        {
+            return this->host_;
+        }
+
+        inline std::string port()
+        {
+            return this->port_;
+        }
+
+        inline std::string user()
+        {
+            return this->user_;
+        }
+
+        inline std::string db()
+        {
+            return this->db_;
+        }
+
+        inline std::string password()
+        {
+            return this->password_;
+        }
+
     private:
         std::string host_;
         std::string port_;
@@ -73,7 +98,6 @@ namespace usub::pg
                      const std::string& sql,
                      Args&&... args)
     {
-        // расширили ошибку
         if (!conn || !conn->connected())
         {
             QueryResult bad;
@@ -114,6 +138,7 @@ namespace usub::pg
         release_connection(conn);
         co_return qr;
     }
+
 } // namespace usub::pg
 
 #endif // PGPOOL_H

@@ -19,8 +19,12 @@ namespace usub::pg
     {
     public:
         template <class HandlerT>
-        requires PgNotifyHandler<HandlerT>
+            requires PgNotifyHandler<HandlerT>
         friend class PgNotificationListener;
+
+        template <class HandlerT>
+            requires PgNotifyHandler<HandlerT>
+        friend class PgNotificationMultiplexer;
 
         PgConnectionLibpq();
         ~PgConnectionLibpq();
@@ -58,25 +62,35 @@ namespace usub::pg
 
     inline void fill_server_error_fields(PGresult* res, QueryResult& out)
     {
-        if (!res) return;
+        if (!res)
+            return;
 
         const char* sqlstate = PQresultErrorField(res, PG_DIAG_SQLSTATE);
-        const char* primary  = PQresultErrorField(res, PG_DIAG_MESSAGE_PRIMARY);
-        const char* detail   = PQresultErrorField(res, PG_DIAG_MESSAGE_DETAIL);
-        const char* hint     = PQresultErrorField(res, PG_DIAG_MESSAGE_HINT);
-
-        if (sqlstate) out.server_sqlstate = sqlstate;
-        if (detail)   out.server_detail   = detail;
-        if (hint)     out.server_hint     = hint;
+        const char* primary = PQresultErrorField(res, PG_DIAG_MESSAGE_PRIMARY);
+        const char* detail = PQresultErrorField(res, PG_DIAG_MESSAGE_DETAIL);
+        const char* hint = PQresultErrorField(res, PG_DIAG_MESSAGE_HINT);
 
         if (primary && *primary)
+        {
             out.error = primary;
+        }
         else
         {
             const char* fallback = PQresultErrorMessage(res);
             if (fallback && *fallback)
                 out.error = fallback;
         }
+
+        if (sqlstate) out.err_detail.sqlstate = sqlstate;
+        if (detail) out.err_detail.detail = detail;
+        if (hint) out.err_detail.hint = hint;
+
+        if (primary && *primary)
+            out.err_detail.message = primary;
+        else if (!out.error.empty())
+            out.err_detail.message = out.error;
+
+        out.err_detail.category = classify_sqlstate(out.err_detail.sqlstate);
 
         out.ok = false;
         out.code = PgErrorCode::ServerError;
@@ -134,7 +148,7 @@ namespace usub::pg
             {
                 temp.emplace_back(std::string(arg));
                 values[idx] = temp.back().c_str();
-                types[idx] = 25;
+                types[idx] = 25; // TEXT
                 lengths[idx] = 0;
                 formats[idx] = 0;
             }
@@ -191,7 +205,6 @@ namespace usub::pg
                 PGresult* res = PQgetResult(this->conn_);
                 if (!res)
                 {
-                    // done
                     if (out.error.empty())
                     {
                         out.ok = true;
@@ -244,7 +257,6 @@ namespace usub::pg
                 co_await wait_readable();
         }
     }
-
 } // namespace usub::pg
 
 #endif // PGCONNECTIONLIBPQ_H
