@@ -140,11 +140,40 @@ namespace usub::pg
             return;
         }
 
+        if (!conn->is_idle())
+        {
+            this->live_count_.fetch_sub(1, std::memory_order_relaxed);
+            return;
+        }
+
         if (!this->idle_.try_enqueue(conn))
         {
             this->live_count_.fetch_sub(1, std::memory_order_relaxed);
         }
     }
+
+    usub::uvent::task::Awaitable<void> PgPool::release_connection_async(std::shared_ptr<PgConnectionLibpq> conn)
+    {
+        if (!conn || !conn->connected())
+        {
+            this->live_count_.fetch_sub(1, std::memory_order_relaxed);
+            co_return;
+        }
+
+        bool pumped = co_await conn->pump_input();
+        if (pumped)
+        {
+            (void)conn->drain_all_results();
+        }
+
+        if (!this->idle_.try_enqueue(conn))
+        {
+            this->live_count_.fetch_sub(1, std::memory_order_relaxed);
+        }
+
+        co_return;
+    }
+
 
     void PgPool::mark_dead(std::shared_ptr<PgConnectionLibpq> const& conn)
     {

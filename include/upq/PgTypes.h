@@ -332,6 +332,25 @@ namespace usub::pg
 
     void build_simple_query(std::vector<uint8_t>& out,
                             std::string_view sql);
+
+    struct PgCopyResult
+    {
+        bool ok{false};
+        PgErrorCode code{PgErrorCode::Unknown};
+        std::string error;
+        PgErrorDetail err_detail;
+        uint64_t rows_affected{0};
+    };
+
+    struct PgCursorChunk
+    {
+        std::vector<QueryResult::Row> rows;
+        bool done{false};
+        bool ok{false};
+        PgErrorCode code{PgErrorCode::Unknown};
+        std::string error;
+        PgErrorDetail err_detail;
+    };
 } // namespace usub::pg
 
-#endif // PGTYPES_H
+#endif

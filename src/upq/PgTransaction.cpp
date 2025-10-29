@@ -80,7 +80,7 @@ namespace usub::pg
             QueryResult r_begin = co_await this->pool_->query_on(this->conn_, bsql);
             if (!r_begin.ok)
             {
-                this->pool_->release_connection(this->conn_);
+                co_await this->pool_->release_connection_async(this->conn_);
                 this->conn_.reset();
                 this->active_ = false;
                 this->committed_ = false;
@@ -110,7 +110,7 @@ namespace usub::pg
 
             if (this->conn_)
             {
-                this->pool_->release_connection(this->conn_);
+                co_await this->pool_->release_connection_async(this->conn_);
                 this->conn_.reset();
             }
 
@@ -124,7 +124,7 @@ namespace usub::pg
             this->rolled_back_ = true;
             this->active_ = false;
 
-            this->pool_->release_connection(this->conn_);
+            co_await this->pool_->release_connection_async(this->conn_);
             this->conn_.reset();
 
             co_return false;
@@ -134,7 +134,7 @@ namespace usub::pg
         this->rolled_back_ = false;
         this->active_ = false;
 
-        this->pool_->release_connection(this->conn_);
+        co_await this->pool_->release_connection_async(this->conn_);
         this->conn_.reset();
 
         co_return true;
@@ -159,7 +159,7 @@ namespace usub::pg
 
         if (this->conn_)
         {
-            this->pool_->release_connection(this->conn_);
+            co_await this->pool_->release_connection_async(this->conn_);
             this->conn_.reset();
         }
 
@@ -172,7 +172,7 @@ namespace usub::pg
         {
             if (this->conn_)
             {
-                this->pool_->release_connection(this->conn_);
+                co_await this->pool_->release_connection_async(this->conn_);
                 this->conn_.reset();
             }
             co_return;
@@ -201,7 +201,7 @@ namespace usub::pg
 
         if (this->conn_)
         {
-            this->pool_->release_connection(this->conn_);
+            co_await this->pool_->release_connection_async(this->conn_);
             this->conn_.reset();
         }
 

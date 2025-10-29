@@ -52,6 +52,9 @@ namespace usub::pg
 
         void release_connection(std::shared_ptr<PgConnectionLibpq> conn);
 
+        usub::uvent::task::Awaitable<void>
+        release_connection_async(std::shared_ptr<PgConnectionLibpq> conn);
+
         template <typename... Args>
         usub::uvent::task::Awaitable<QueryResult>
         query_on(std::shared_ptr<PgConnectionLibpq> const& conn,
@@ -147,7 +150,7 @@ namespace usub::pg
             std::forward<Args>(args)...
         );
 
-        release_connection(conn);
+        co_await release_connection_async(conn);
         co_return qr;
     }
 } // namespace usub::pg

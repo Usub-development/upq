@@ -26,6 +26,8 @@ namespace usub::pg
             requires PgNotifyHandler<HandlerT>
         friend class PgNotificationMultiplexer;
 
+        friend class PgPool;
+
         PgConnectionLibpq();
         ~PgConnectionLibpq();
 
@@ -41,12 +43,50 @@ namespace usub::pg
         usub::uvent::task::Awaitable<QueryResult>
         exec_param_query_nonblocking(const std::string& sql, Args&&... args);
 
+        usub::uvent::task::Awaitable<PgCopyResult>
+        copy_in_start(const std::string& sql);
+
+        usub::uvent::task::Awaitable<PgCopyResult>
+        copy_in_send_chunk(const void* data, size_t len);
+
+        usub::uvent::task::Awaitable<PgCopyResult>
+        copy_in_finish();
+
+        usub::uvent::task::Awaitable<PgCopyResult>
+        copy_out_start(const std::string& sql);
+
+        usub::uvent::task::Awaitable<PgWireResult<std::vector<uint8_t>>>
+        copy_out_read_chunk();
+
+        std::string make_cursor_name();
+
+        usub::uvent::task::Awaitable<QueryResult>
+        cursor_declare(const std::string& cursor_name,
+                       const std::string& sql);
+
+        usub::uvent::task::Awaitable<PgCursorChunk>
+        cursor_fetch_chunk(const std::string& cursor_name,
+                           uint32_t count);
+
+        usub::uvent::task::Awaitable<QueryResult>
+        cursor_close(const std::string& cursor_name);
+
         PGconn* raw_conn() noexcept;
+
+        bool is_idle();
 
     private:
         usub::uvent::task::Awaitable<void> wait_readable();
         usub::uvent::task::Awaitable<void> wait_writable();
         usub::uvent::task::Awaitable<void> wait_readable_for_listener();
+
+        usub::uvent::task::Awaitable<bool> flush_outgoing();
+        usub::uvent::task::Awaitable<bool> pump_input();
+
+        QueryResult drain_all_results();
+        PgCopyResult drain_copy_end_result();
+        PgCursorChunk drain_single_result_rows();
+        QueryResult drain_single_result_status_only();
 
     private:
         PGconn* conn_{nullptr};
@@ -58,6 +98,8 @@ namespace usub::pg
                 usub::uvent::net::Role::ACTIVE
             >
         > sock_;
+
+        uint64_t cursor_seq_{0};
     };
 
     inline void fill_server_error_fields(PGresult* res, QueryResult& out)
@@ -95,6 +137,78 @@ namespace usub::pg
         out.ok = false;
         out.code = PgErrorCode::ServerError;
         out.rows_valid = false;
+    }
+
+    inline void fill_server_error_fields_copy(PGresult* res, PgCopyResult& out)
+    {
+        if (!res)
+            return;
+
+        const char* sqlstate = PQresultErrorField(res, PG_DIAG_SQLSTATE);
+        const char* primary = PQresultErrorField(res, PG_DIAG_MESSAGE_PRIMARY);
+        const char* detail = PQresultErrorField(res, PG_DIAG_MESSAGE_DETAIL);
+        const char* hint = PQresultErrorField(res, PG_DIAG_MESSAGE_HINT);
+
+        if (primary && *primary)
+        {
+            out.error = primary;
+        }
+        else
+        {
+            const char* fallback = PQresultErrorMessage(res);
+            if (fallback && *fallback)
+                out.error = fallback;
+        }
+
+        if (sqlstate) out.err_detail.sqlstate = sqlstate;
+        if (detail) out.err_detail.detail = detail;
+        if (hint) out.err_detail.hint = hint;
+
+        if (primary && *primary)
+            out.err_detail.message = primary;
+        else if (!out.error.empty())
+            out.err_detail.message = out.error;
+
+        out.err_detail.category = classify_sqlstate(out.err_detail.sqlstate);
+
+        out.ok = false;
+        out.code = PgErrorCode::ServerError;
+    }
+
+    inline void fill_server_error_fields_cursor(PGresult* res, PgCursorChunk& out)
+    {
+        if (!res)
+            return;
+
+        const char* sqlstate = PQresultErrorField(res, PG_DIAG_SQLSTATE);
+        const char* primary = PQresultErrorField(res, PG_DIAG_MESSAGE_PRIMARY);
+        const char* detail = PQresultErrorField(res, PG_DIAG_MESSAGE_DETAIL);
+        const char* hint = PQresultErrorField(res, PG_DIAG_MESSAGE_HINT);
+
+        if (primary && *primary)
+        {
+            out.error = primary;
+        }
+        else
+        {
+            const char* fallback = PQresultErrorMessage(res);
+            if (fallback && *fallback)
+                out.error = fallback;
+        }
+
+        if (sqlstate) out.err_detail.sqlstate = sqlstate;
+        if (detail) out.err_detail.detail = detail;
+        if (hint) out.err_detail.hint = hint;
+
+        if (primary && *primary)
+            out.err_detail.message = primary;
+        else if (!out.error.empty())
+            out.err_detail.message = out.error;
+
+        out.err_detail.category = classify_sqlstate(out.err_detail.sqlstate);
+
+        out.ok = false;
+        out.code = PgErrorCode::ServerError;
     }
 
     template <typename... Args>
