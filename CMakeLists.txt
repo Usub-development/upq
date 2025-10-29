@@ -38,7 +38,9 @@ file(GLOB_RECURSE UPQ_SOURCES CONFIGURE_DEPENDS
 )
 
 add_library(upq ${UPQ_SOURCES} ${UPQ_HEADERS}
-        include/upq/PgNotificationMultiplexer.h)
+        include/upq/PgNotificationMultiplexer.h
+        include/upq/PgHealthChecker.h
+        src/upq/PgHealthChecker.cpp)
 add_library(usub::upq ALIAS upq)
 
 target_include_directories(upq

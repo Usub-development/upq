@@ -23,31 +23,94 @@ It guarantees **no blocking**, **no busy-waiting**, and **safe use from multiple
 
 ## Initialization
 
+`PgPool` now optionally supports a background health checker for periodic connection validation.
+
 ```cpp
 usub::pg::PgPool::init_global(
     host, port, user, db, password,
-    max_pool_size, queue_capacity
+    max_pool_size, queue_capacity,
+    usub::pg::PgHealthConfig{
+        .enabled = true,
+        .interval_ms = 3000
+    }
 );
 ```
 
-Example:
+When `.enabled = true`, the pool automatically spawns an internal coroutine that periodically runs lightweight
+`SELECT 1;` probes on temporary connections to ensure the database is reachable.
+
+If `.enabled = false` (default), the health checker is disabled.
+
+You can access runtime statistics at any time via:
 
 ```cpp
-usub::pg::PgPool::init_global(
-    "localhost",
-    "5432",
-    "postgres",
-    "mydb",
-    "password",
-    32,  // max_pool_size
-    64   // queue_capacity
-);
+auto& hc = usub::pg::PgPool::instance().health_checker();
+auto& stats = hc.stats();
 
-auto& pool = usub::pg::PgPool::instance();
+std::cout
+    << "checks=" << stats.iterations.load()
+    << " ok=" << stats.ok_checks.load()
+    << " failed=" << stats.failed_checks.load()
+    << std::endl;
 ```
 
-This must be called **once** during startup.
-`instance()` returns the global singleton thereafter.
+---
+
+## Health Checker
+
+`PgHealthChecker` is a lightweight background monitor built into the pool.
+It ensures early detection of connection failures without impacting performance.
+
+| Field           | Type               | Description                                     |
+|-----------------|--------------------|-------------------------------------------------|
+| `enabled`       | `bool`             | Whether the health checker coroutine should run |
+| `interval_ms`   | `uint64_t`         | Delay between health probes                     |
+| `iterations`    | `atomic<uint64_t>` | Total number of health iterations               |
+| `ok_checks`     | `atomic<uint64_t>` | Successful `SELECT 1` responses                 |
+| `failed_checks` | `atomic<uint64_t>` | Failed or unreachable checks                    |
+
+### Behavior
+
+* When enabled, a coroutine runs forever in the background.
+* Every interval:
+
+    1. Acquires a fresh connection from the pool.
+    2. Executes `SELECT 1;` using non-blocking I/O.
+    3. Updates internal counters.
+    4. Returns the connection back to the pool.
+* Failures are silent — they do not throw or disrupt normal queries.
+* Intended for observability and proactive reconnection handling.
+
+### Example
+
+```cpp
+task::Awaitable<void> print_pg_health()
+{
+    auto& pool = usub::pg::PgPool::instance();
+    auto& hc = pool.health_checker();
+
+    for (;;)
+    {
+        auto& s = hc.stats();
+        std::cout
+            << "[Health] iter=" << s.iterations.load()
+            << " ok=" << s.ok_checks.load()
+            << " fail=" << s.failed_checks.load()
+            << std::endl;
+
+        co_await usub::uvent::system::this_coroutine::sleep_for(
+            std::chrono::seconds(5)
+        );
+    }
+}
+```
+
+### Notes
+
+* Uses existing event loop and coroutine scheduler (`uvent`).
+* Generates negligible load on the database (`SELECT 1`).
+* Default interval: **600 000 ms**.
+* Can be disabled completely if unnecessary.
 
 ---
 
@@ -201,10 +264,6 @@ This provides natural backpressure and keeps memory footprint predictable.
 
 ---
 
-## Error transparency (since v1.0.1)
-
-All queries and internal operations now report structured diagnostic codes.
-
 ### Example: Connection loss
 
 ```cpp
@@ -244,25 +303,26 @@ if (!res.ok && res.code == PgErrorCode::ServerError)
 
 ## Best practices
 
-- ✅ Initialize pool early (before spawning coroutines).
-- ✅ Use `query_awaitable()` for short-lived queries.
-- ✅ Use manual `acquire_connection()` for long-running listeners or transactions.
-- ✅ Check `QueryResult.code` and `ok` for every query.
-- ✅ Release connections when finished — don’t hold them across awaits.
-- ❌ Don’t share one connection across threads.
-- ❌ Don’t assume immediate connection creation — first queries may take longer.
+* ✅ Initialize pool early (before spawning coroutines).
+* ✅ Use `query_awaitable()` for short-lived queries.
+* ✅ Use manual `acquire_connection()` for long-running listeners or transactions.
+* ✅ Check `QueryResult.code` and `ok` for every query.
+* ✅ Release connections when finished — don’t hold them across awaits.
+* ❌ Don’t share one connection across threads.
+* ❌ Don’t assume immediate connection creation — first queries may take longer.
 
 ---
 
 ## Summary
 
-| Feature      | Description                               |
-|--------------|-------------------------------------------|
-| Asynchronous | Non-blocking coroutine API                |
-| Safe         | Lock-free concurrent access               |
-| Lazy         | Creates connections only as needed        |
-| Bounded      | Max live connections controlled by config |
-| Transparent  | Every error is classified and traceable   |
+| Feature        | Description                               |
+|----------------|-------------------------------------------|
+| Asynchronous   | Non-blocking coroutine API                |
+| Safe           | Lock-free concurrent access               |
+| Lazy           | Creates connections only as needed        |
+| Bounded        | Max live connections controlled by config |
+| Transparent    | Every error is classified and traceable   |
+| Health Checker | Background connection heartbeat loop      |
 
 `PgPool` is the backbone of the upq runtime — it provides scalable, coroutine-friendly database access with
 deterministic failure semantics.

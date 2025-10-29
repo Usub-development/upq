@@ -204,7 +204,11 @@ int main()
         "postgres", // db
         "password", // password
         /*max_pool_size*/ 32,
-        /*queue_capacity*/ 64
+        /*queue_capacity*/ 64,
+        usub::pg::PgPoolHealthConfig{
+            .enabled = true,
+            .interval_ms = 3000
+        }
     );
 
     uvent.for_each_thread([&](int threadIndex, thread::ThreadLocalStorage* tls)
