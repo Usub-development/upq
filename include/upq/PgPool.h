@@ -9,7 +9,6 @@
 #include <chrono>
 
 #include "uvent/Uvent.h"
-
 #include "PgConnection.h"
 #include "PgTypes.h"
 #include "uvent/utils/datastructures/queue/ConcurrentQueues.h"
@@ -33,19 +32,9 @@ namespace usub::pg
                std::string db,
                std::string password,
                size_t max_pool_size = 32,
-               size_t queue_capacity = 64,
                PgPoolHealthConfig health_cfg = {});
 
-        static void init_global(const std::string& host,
-                                const std::string& port,
-                                const std::string& user,
-                                const std::string& db,
-                                const std::string& password,
-                                size_t max_pool_size = 32,
-                                size_t queue_capacity = 64,
-                                PgPoolHealthConfig health_cfg = {});
-
-        static PgPool& instance();
+        ~PgPool();
 
         usub::uvent::task::Awaitable<std::shared_ptr<PgConnectionLibpq>>
         acquire_connection();
@@ -103,8 +92,6 @@ namespace usub::pg
         HealthStats stats_;
 
         std::unique_ptr<PgHealthChecker> health_checker_;
-
-        static std::unique_ptr<PgPool> instance_;
     };
 
     template <typename... Args>
@@ -153,6 +140,6 @@ namespace usub::pg
         co_await release_connection_async(conn);
         co_return qr;
     }
-} // namespace usub::pg
+}
 
-#endif // PGPOOL_H
+#endif

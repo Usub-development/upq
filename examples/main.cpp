@@ -8,10 +8,10 @@
 
 using namespace usub::uvent;
 
-task::Awaitable<void> test_db_query()
+task::Awaitable<void> test_db_query(usub::pg::PgPool& pool)
 {
     {
-        auto res_schema = co_await usub::pg::PgPool::instance().query_awaitable(
+        auto res_schema = co_await pool.query_awaitable(
             "CREATE TABLE IF NOT EXISTS public.users("
             "id SERIAL PRIMARY KEY,"
             "name TEXT,"
@@ -27,7 +27,7 @@ task::Awaitable<void> test_db_query()
     }
 
     {
-        usub::pg::PgTransaction txn;
+        usub::pg::PgTransaction txn(&pool);
 
         bool ok_begin = co_await txn.begin();
         if (!ok_begin)
@@ -70,7 +70,7 @@ task::Awaitable<void> test_db_query()
     }
 
     {
-        auto res_sel = co_await usub::pg::PgPool::instance().query_awaitable(
+        auto res_sel = co_await pool.query_awaitable(
             "SELECT id, name FROM users ORDER BY id LIMIT $1;",
             5
         );
@@ -105,14 +105,13 @@ struct MyNotifyHandler
     usub::uvent::task::Awaitable<void>
     operator()(std::string channel,
                std::string payload,
-               int backend_pid) const
+               int backend_pid)
     {
         std::cout << "[NOTIFY] ch=" << channel
             << " pid=" << backend_pid
             << " payload=" << payload << std::endl;
 
-        auto& pool = usub::pg::PgPool::instance();
-        auto res = co_await pool.query_awaitable(
+        auto res = co_await this->pool->query_awaitable(
             "SELECT id, name FROM users WHERE id = $1;",
             1
         );
@@ -129,12 +128,12 @@ struct MyNotifyHandler
 
         co_return;
     }
+
+    usub::pg::PgPool* pool;
 };
 
-task::Awaitable<void> spawn_listener()
+task::Awaitable<void> spawn_listener(usub::pg::PgPool& pool)
 {
-    auto& pool = usub::pg::PgPool::instance();
-
     auto conn = co_await pool.acquire_connection();
     using Listener = usub::pg::PgNotificationListener<MyNotifyHandler>;
     auto listener = std::make_shared<Listener>(
@@ -142,59 +141,71 @@ task::Awaitable<void> spawn_listener()
         conn
     );
 
-    listener->setHandler(MyNotifyHandler{});
+    listener->setHandler(MyNotifyHandler{&pool});
 
     co_await listener->run();
     co_return;
 }
 
-task::Awaitable<void> spawn_listener_multiplexer()
-{
-    static std::shared_ptr<usub::pg::PgConnectionLibpq> dedicated_conn;
-    static std::shared_ptr<usub::pg::PgNotificationMultiplexer<MyNotifyHandler>> mux;
-
-    auto& pool = usub::pg::PgPool::instance();
-
-    if (!dedicated_conn)
+struct BalanceLogger : usub::pg::IPgNotifyHandler {
+    usub::uvent::task::Awaitable<void>
+    operator()(std::string channel,
+               std::string payload,
+               int backend_pid) override
     {
-        dedicated_conn = std::make_shared<usub::pg::PgConnectionLibpq>();
+        std::cout << "[BALANCE] pid=" << backend_pid
+                  << " payload=" << payload << "\n";
+        co_return;
+    }
+};
 
-        std::string conninfo =
-            "host=" + pool.host() +
-            " port=" + pool.port() +
-            " user=" + pool.user() +
-            " dbname=" + pool.db() +
-            " password=" + pool.password() +
-            " sslmode=disable";
+struct RiskAlerter : usub::pg::IPgNotifyHandler {
+    usub::uvent::task::Awaitable<void>
+    operator()(std::string channel,
+               std::string payload,
+               int backend_pid) override
+    {
+        std::cout << "[RISK] pid=" << backend_pid
+                  << " payload=" << payload << "\n";
+        co_return;
+    }
+};
 
-        auto err = co_await dedicated_conn->connect_async(conninfo);
-        if (err.has_value())
-        {
-            std::cout << "[FATAL] listener connect failed: " << err.value() << std::endl;
-            co_return;
-        }
+usub::uvent::task::Awaitable<void> spawn_listener_multiplexer(usub::pg::PgPool& pool)
+{
+    auto conn = co_await pool.acquire_connection();
 
-        mux = std::make_shared<usub::pg::PgNotificationMultiplexer<MyNotifyHandler>>(dedicated_conn);
+    usub::pg::PgNotificationMultiplexer mux(
+        conn,
+        pool.host(),
+        pool.port(),
+        pool.user(),
+        pool.db(),
+        pool.password(),
+        {512}
+    );
 
-        bool ok1 = co_await mux->add_handler("metrics", MyNotifyHandler{});
-        bool ok2 = co_await mux->add_handler("alerts", MyNotifyHandler{});
+    auto h1 = co_await mux.add_handler(
+        "balances.updated",
+        std::make_shared<BalanceLogger>()
+    );
 
-        if (!ok1 || !ok2)
-        {
-            std::cout << "[FATAL] LISTEN failed\n";
-            co_return;
-        }
+    auto h2 = co_await mux.add_handler(
+        "risk.test",
+        std::make_shared<RiskAlerter>()
+    );
 
-        usub::uvent::system::co_spawn(mux->run());
+    if (!h1.has_value() || !h2.has_value()) {
+        std::cout << "Failed to subscribe one or more channels\n";
+        co_return;
     }
 
+    co_await mux.run();
     co_return;
 }
 
-task::Awaitable<void> massive_ops_example()
+task::Awaitable<void> massive_ops_example(usub::pg::PgPool& pool)
 {
-    auto& pool = usub::pg::PgPool::instance();
-
     {
         auto res_schema = co_await pool.query_awaitable(
             "CREATE TABLE IF NOT EXISTS public.bigdata("
@@ -392,14 +403,13 @@ int main()
 
     usub::Uvent uvent(4);
 
-    usub::pg::PgPool::init_global(
+    auto pool = usub::pg::PgPool(
         "localhost", // host
         "12432", // port
         "postgres", // user
         "postgres", // db
         "password", // password
         /*max_pool_size*/ 32,
-        /*queue_capacity*/ 64,
         usub::pg::PgPoolHealthConfig{
             .enabled = true,
             .interval_ms = 3000
@@ -409,15 +419,15 @@ int main()
     uvent.for_each_thread([&](int threadIndex, thread::ThreadLocalStorage* tls)
     {
         system::co_spawn_static(
-            test_db_query(),
+            test_db_query(pool),
             threadIndex
         );
 
-        system::co_spawn_static(spawn_listener_multiplexer(), threadIndex);
     });
 
-    usub::uvent::system::co_spawn(spawn_listener());
-    usub::uvent::system::co_spawn(massive_ops_example());
+    system::co_spawn(spawn_listener_multiplexer(pool));
+    system::co_spawn(spawn_listener(pool));
+    system::co_spawn(massive_ops_example(pool));
 
     uvent.run();
     return 0;

@@ -4,75 +4,37 @@
 
 namespace usub::pg
 {
-    std::unique_ptr<PgPool> PgPool::instance_ = nullptr;
-
     PgPool::PgPool(std::string host,
                    std::string port,
                    std::string user,
                    std::string db,
                    std::string password,
                    size_t max_pool_size,
-                   size_t queue_capacity,
                    PgPoolHealthConfig health_cfg)
         : host_(std::move(host))
           , port_(std::move(port))
           , user_(std::move(user))
           , db_(std::move(db))
           , password_(std::move(password))
-          , idle_(queue_capacity)
+          , idle_(max_pool_size)
           , max_pool_(max_pool_size)
           , live_count_(0)
           , health_cfg_(health_cfg)
           , stats_{}
     {
-        health_checker_ = std::make_unique<PgHealthChecker>(*this, health_cfg);
+        this->health_checker_ = std::make_unique<PgHealthChecker>(*this, health_cfg);
 
         if (health_cfg.enabled)
         {
-            usub::uvent::system::co_spawn(health_checker_->run());
+            usub::uvent::system::co_spawn(this->health_checker_->run());
         }
     }
 
-    void PgPool::init_global(const std::string& host,
-                             const std::string& port,
-                             const std::string& user,
-                             const std::string& db,
-                             const std::string& password,
-                             size_t max_pool_size,
-                             size_t queue_capacity,
-                             PgPoolHealthConfig health_cfg)
-    {
-        if (instance_)
-        {
-            return;
-        }
-
-        instance_.reset(
-            new PgPool(
-                host,
-                port,
-                user,
-                db,
-                password,
-                max_pool_size,
-                queue_capacity,
-                health_cfg
-            )
-        );
-    }
-
-    PgPool& PgPool::instance()
-    {
-        if (!instance_)
-        {
-            std::abort();
-        }
-        return *instance_;
-    }
+    PgPool::~PgPool() = default;
 
     PgHealthChecker& PgPool::health_checker()
     {
-        return *health_checker_;
+        return *this->health_checker_;
     }
 
     usub::uvent::task::Awaitable<std::shared_ptr<PgConnectionLibpq>>
@@ -152,7 +114,8 @@ namespace usub::pg
         }
     }
 
-    usub::uvent::task::Awaitable<void> PgPool::release_connection_async(std::shared_ptr<PgConnectionLibpq> conn)
+    usub::uvent::task::Awaitable<void>
+    PgPool::release_connection_async(std::shared_ptr<PgConnectionLibpq> conn)
     {
         if (!conn || !conn->connected())
         {
@@ -174,7 +137,6 @@ namespace usub::pg
         co_return;
     }
 
-
     void PgPool::mark_dead(std::shared_ptr<PgConnectionLibpq> const& conn)
     {
         if (!conn)
@@ -182,4 +144,4 @@ namespace usub::pg
 
         this->live_count_.fetch_sub(1, std::memory_order_relaxed);
     }
-} // namespace usub::pg
+}

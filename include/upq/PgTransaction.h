@@ -34,7 +34,7 @@ namespace usub::pg
     {
     public:
         explicit PgTransaction(
-            PgPool* pool = &PgPool::instance(),
+            PgPool* pool,
             PgTransactionConfig cfg = {}
         );
 
@@ -95,7 +95,7 @@ namespace usub::pg
         std::shared_ptr<PgConnectionLibpq> connection() const { return conn_; }
 
     private:
-        PgPool* pool_{nullptr};
+        PgPool* pool_;
         PgTransactionConfig cfg_;
         std::shared_ptr<PgConnectionLibpq> conn_;
 

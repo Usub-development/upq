@@ -22,8 +22,6 @@ namespace usub::pg
             requires PgNotifyHandler<HandlerT>
         friend class PgNotificationListener;
 
-        template <class HandlerT>
-            requires PgNotifyHandler<HandlerT>
         friend class PgNotificationMultiplexer;
 
         friend class PgPool;
