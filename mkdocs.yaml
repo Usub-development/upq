@@ -56,6 +56,7 @@ nav:
   - Transactions: transaction.md
   - Query Result: results.md
   - Notifications (LISTEN / NOTIFY): notifications.md
+  - Notification Multiplexer: notification-multiplexer.md
 
 extra:
   social:

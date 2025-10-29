@@ -4,6 +4,7 @@
 #include "upq/PgPool.h"
 #include "upq/PgTransaction.h"
 #include "upq/PgNotificationListener.h"
+#include "upq/PgNotificationMultiplexer.h"
 
 using namespace usub::uvent;
 
@@ -106,7 +107,10 @@ struct MyNotifyHandler
                std::string payload,
                int backend_pid) const
     {
-        std::cout << "payload: " << payload << std::endl;
+        std::cout << "[NOTIFY] ch=" << channel
+            << " pid=" << backend_pid
+            << " payload=" << payload << std::endl;
+
         auto& pool = usub::pg::PgPool::instance();
         auto res = co_await pool.query_awaitable(
             "SELECT id, name FROM users WHERE id = $1;",
@@ -144,6 +148,48 @@ task::Awaitable<void> spawn_listener()
     co_return;
 }
 
+task::Awaitable<void> spawn_listener_multiplexer()
+{
+    static std::shared_ptr<usub::pg::PgConnectionLibpq> dedicated_conn;
+    static std::shared_ptr<usub::pg::PgNotificationMultiplexer<MyNotifyHandler>> mux;
+
+    auto& pool = usub::pg::PgPool::instance();
+
+    if (!dedicated_conn)
+    {
+        dedicated_conn = std::make_shared<usub::pg::PgConnectionLibpq>();
+
+        std::string conninfo =
+            "host=" + pool.host() +
+            " port=" + pool.port() +
+            " user=" + pool.user() +
+            " dbname=" + pool.db() +
+            " password=" + pool.password() +
+            " sslmode=disable";
+
+        auto err = co_await dedicated_conn->connect_async(conninfo);
+        if (err.has_value())
+        {
+            std::cout << "[FATAL] listener connect failed: " << err.value() << std::endl;
+            co_return;
+        }
+
+        mux = std::make_shared<usub::pg::PgNotificationMultiplexer<MyNotifyHandler>>(dedicated_conn);
+
+        bool ok1 = co_await mux->add_handler("metrics", MyNotifyHandler{});
+        bool ok2 = co_await mux->add_handler("alerts", MyNotifyHandler{});
+
+        if (!ok1 || !ok2)
+        {
+            std::cout << "[FATAL] LISTEN failed\n";
+            co_return;
+        }
+
+        usub::uvent::system::co_spawn(mux->run());
+    }
+
+    co_return;
+}
 
 int main()
 {
@@ -167,6 +213,8 @@ int main()
             test_db_query(),
             threadIndex
         );
+
+        system::co_spawn_static(spawn_listener_multiplexer(), threadIndex);
     });
 
     usub::uvent::system::co_spawn(spawn_listener());

@@ -1,12 +1,12 @@
-//
-// Created by root on 10/27/25.
-//
-
 #ifndef PGTRANSACTION_H
 #define PGTRANSACTION_H
 
 #include <memory>
 #include <string>
+#include <string_view>
+#include <utility>
+#include <cstdint>
+#include <atomic>
 
 #include "PgPool.h"
 #include "PgConnection.h"
@@ -15,10 +15,29 @@
 
 namespace usub::pg
 {
+    enum class TxIsolationLevel : uint8_t
+    {
+        Default = 0,
+        ReadCommitted,
+        RepeatableRead,
+        Serializable
+    };
+
+    struct PgTransactionConfig
+    {
+        TxIsolationLevel isolation = TxIsolationLevel::Default;
+        bool read_only = false;
+        bool deferrable = false;
+    };
+
     class PgTransaction
     {
     public:
-        explicit PgTransaction(PgPool* pool = &PgPool::instance());
+        explicit PgTransaction(
+            PgPool* pool = &PgPool::instance(),
+            PgTransactionConfig cfg = {}
+        );
+
         ~PgTransaction();
 
         usub::uvent::task::Awaitable<bool> begin();
@@ -39,13 +58,53 @@ namespace usub::pg
         bool is_committed() const noexcept { return committed_; }
         bool is_rolled_back() const noexcept { return rolled_back_; }
 
+        class PgSubtransaction
+        {
+        public:
+            PgSubtransaction(PgTransaction& parent,
+                             std::string savepoint_name);
+
+            ~PgSubtransaction();
+
+            usub::uvent::task::Awaitable<bool> begin();
+            usub::uvent::task::Awaitable<bool> commit();
+            usub::uvent::task::Awaitable<void> rollback();
+
+            bool is_active() const noexcept { return active_; }
+            bool is_committed() const noexcept { return committed_; }
+            bool is_rolled_back() const noexcept { return rolled_back_; }
+
+            template <typename... Args>
+            usub::uvent::task::Awaitable<QueryResult>
+            query(const std::string& sql, Args&&... args)
+            {
+                co_return co_await parent_.query(sql, std::forward<Args>(args)...);
+            }
+
+        private:
+            PgTransaction& parent_;
+            std::string sp_name_;
+
+            bool active_{false};
+            bool committed_{false};
+            bool rolled_back_{false};
+        };
+
+        PgSubtransaction make_subtx();
+
+        std::shared_ptr<PgConnectionLibpq> connection() const { return conn_; }
+
     private:
         PgPool* pool_{nullptr};
+        PgTransactionConfig cfg_;
         std::shared_ptr<PgConnectionLibpq> conn_;
 
         bool active_{false};
         bool committed_{false};
         bool rolled_back_{false};
+
+        usub::uvent::task::Awaitable<bool> send_sql_nocheck(const std::string& sql);
+        static std::string build_begin_sql(const PgTransactionConfig& cfg);
     };
 
     template <typename... Args>
@@ -88,6 +147,7 @@ namespace usub::pg
 
         co_return qr;
     }
+
 } // namespace usub::pg
 
-#endif //PGTRANSACTION_H
+#endif // PGTRANSACTION_H
