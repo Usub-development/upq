@@ -16,47 +16,44 @@ namespace usub::pg
 
     usub::uvent::task::Awaitable<void> PgHealthChecker::run()
     {
+        using namespace std::chrono;
+        auto next_sleep = milliseconds(cfg_.interval_ms ? cfg_.interval_ms : 60000);
+
         for (;;)
         {
-            PgPoolHealthConfig cur_cfg = this->cfg_;
-
-            if (!cur_cfg.enabled)
+            try
             {
-                co_await usub::uvent::system::this_coroutine::sleep_for(
-                    std::chrono::milliseconds(1000)
-                );
-                continue;
-            }
+                PgPoolHealthConfig cur = cfg_;
 
-            uint64_t interval = cur_cfg.interval_ms;
-            if (interval == 0)
-                interval = 1000;
-
-            this->stats_.iterations.fetch_add(1, std::memory_order_relaxed);
-
-            auto conn = co_await this->pool_.acquire_connection();
-
-            bool alive = false;
-            if (conn && conn->connected())
-            {
-                QueryResult ping = co_await conn->exec_simple_query_nonblocking("SELECT 1;");
-                if (ping.ok)
+                if (!cur.enabled)
                 {
-                    alive = true;
+                    co_await usub::uvent::system::this_coroutine::sleep_for(milliseconds(1000));
+                    continue;
+                }
+
+                this->stats_.iterations.fetch_add(1, std::memory_order_relaxed);
+
+                auto res = co_await pool_.query_awaitable("SELECT 1;");
+
+                if (res.ok)
+                {
                     this->stats_.ok_checks.fetch_add(1, std::memory_order_relaxed);
+                    next_sleep = milliseconds(cur.interval_ms ? cur.interval_ms : 1000);
+                }
+                else
+                {
+                    this->stats_.failed_checks.fetch_add(1, std::memory_order_relaxed);
+                    auto backoff = std::min<uint64_t>(cur.interval_ms ? cur.interval_ms * 2 : 2000, 15000);
+                    next_sleep = milliseconds(backoff);
                 }
             }
-
-            if (!alive)
+            catch (...)
             {
                 this->stats_.failed_checks.fetch_add(1, std::memory_order_relaxed);
+                next_sleep = milliseconds(std::min<uint64_t>(cfg_.interval_ms ? cfg_.interval_ms * 2 : 2000, 15000));
             }
 
-            co_await this->pool_.release_connection_async(conn);
-
-            co_await usub::uvent::system::this_coroutine::sleep_for(
-                std::chrono::milliseconds(interval)
-            );
+            co_await usub::uvent::system::this_coroutine::sleep_for(next_sleep);
         }
 
         co_return;
