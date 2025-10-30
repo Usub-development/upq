@@ -59,6 +59,50 @@ namespace usub::pg
         Other // fallback
     };
 
+    inline const char* toString(PgErrorCode code) noexcept
+    {
+        switch (code)
+        {
+        case PgErrorCode::OK: return "OK";
+        case PgErrorCode::InvalidFuture: return "InvalidFuture";
+        case PgErrorCode::ConnectionClosed: return "ConnectionClosed";
+        case PgErrorCode::SocketReadFailed: return "SocketReadFailed";
+        case PgErrorCode::ProtocolCorrupt: return "ProtocolCorrupt";
+        case PgErrorCode::ParserTruncatedField: return "ParserTruncatedField";
+        case PgErrorCode::ParserTruncatedRow: return "ParserTruncatedRow";
+        case PgErrorCode::ParserTruncatedHeader: return "ParserTruncatedHeader";
+        case PgErrorCode::ServerError: return "ServerError";
+        case PgErrorCode::AuthFailed: return "AuthFailed";
+        case PgErrorCode::AwaitCanceled: return "AwaitCanceled";
+        case PgErrorCode::Unknown: return "Unknown";
+        }
+        return "InvalidPgErrorCode";
+    }
+
+    inline const char* toString(PgSqlStateClass cls) noexcept
+    {
+        switch (cls)
+        {
+        case PgSqlStateClass::None: return "None";
+        case PgSqlStateClass::ConnectionError: return "ConnectionError";
+        case PgSqlStateClass::SyntaxError: return "SyntaxError";
+        case PgSqlStateClass::UndefinedObject: return "UndefinedObject";
+        case PgSqlStateClass::ConstraintViolation: return "ConstraintViolation";
+        case PgSqlStateClass::UniqueViolation: return "UniqueViolation";
+        case PgSqlStateClass::CheckViolation: return "CheckViolation";
+        case PgSqlStateClass::NotNullViolation: return "NotNullViolation";
+        case PgSqlStateClass::ForeignKeyViolation: return "ForeignKeyViolation";
+        case PgSqlStateClass::Deadlock: return "Deadlock";
+        case PgSqlStateClass::SerializationFailure: return "SerializationFailure";
+        case PgSqlStateClass::PrivilegeError: return "PrivilegeError";
+        case PgSqlStateClass::DataException: return "DataException";
+        case PgSqlStateClass::TransactionState: return "TransactionState";
+        case PgSqlStateClass::InternalError: return "InternalError";
+        case PgSqlStateClass::Other: return "Other";
+        }
+        return "InvalidPgSqlStateClass";
+    }
+
     struct PgErrorDetail
     {
         std::string sqlstate;
