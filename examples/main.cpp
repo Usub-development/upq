@@ -42,6 +42,21 @@ task::Awaitable<void> test_db_query(usub::pg::PgPool& pool)
     }
 
     {
+        std::vector<std::string> array = {"test", "array"};
+        auto res_schema = co_await pool.query_awaitable(
+            R"(INSERT INTO array_test (test_array, comment) VALUES ($1, $2);)",
+            array,
+            "comment"
+        );
+
+        if (!res_schema.ok)
+        {
+            std::cout << "[ERROR] SCHEMA INIT failed: " << res_schema.error << std::endl;
+            co_return;
+        }
+    }
+
+    {
         usub::pg::PgTransaction txn(&pool);
 
         bool ok_begin = co_await txn.begin();
@@ -115,6 +130,98 @@ task::Awaitable<void> test_db_query(usub::pg::PgPool& pool)
     co_return;
 }
 
+task::Awaitable<void> test_array_inserts(usub::pg::PgPool& pool)
+{
+    {
+        auto res = co_await pool.query_awaitable(R"SQL(
+            CREATE TABLE IF NOT EXISTS array_test (
+                id         bigserial PRIMARY KEY,
+                test_array text[] NOT NULL,
+                comment    text
+            );
+        )SQL");
+        if (!res.ok)
+        {
+            std::cout << "[ERROR] CREATE array_test: " << res.error << "\n";
+            co_return;
+        }
+
+        std::vector<std::string> array = {"test", "array"};
+        auto ins = co_await pool.query_awaitable(
+            R"(INSERT INTO array_test (test_array, comment) VALUES ($1, $2);)",
+            array,
+            "comment"
+        );
+        if (!ins.ok)
+        {
+            std::cout << "[ERROR] INSERT array_test: " << ins.error << "\n";
+            co_return;
+        }
+    }
+
+    {
+        auto res = co_await pool.query_awaitable(R"SQL(
+            CREATE TABLE IF NOT EXISTS array_test_multi (
+                id        bigserial PRIMARY KEY,
+                a_int4_1  int4[]  NOT NULL,
+                a_int4_2  int4[]  NOT NULL,
+                a_float8  float8[] NOT NULL,
+                a_bool    bool[]  NOT NULL,
+                a_text    text[]  NOT NULL,
+                comment   text
+            );
+        )SQL");
+        if (!res.ok)
+        {
+            std::cout << "[ERROR] CREATE array_test_multi: " << res.error << "\n";
+            co_return;
+        }
+
+        std::array<int, 3> ai{1, 2, 3};
+        int ci[3]{4, 5, 6};
+        std::list<double> ld{1.25, 2.5};
+        std::vector<std::optional<bool>> vb{true, std::nullopt, false};
+        std::initializer_list<const char*> il = {"x", "y"};
+
+        auto ins = co_await pool.query_awaitable(
+            R"(INSERT INTO array_test_multi
+               (a_int4_1, a_int4_2, a_float8, a_bool, a_text, comment)
+               VALUES ($1, $2, $3, $4, $5, $6);)",
+            ai, // -> int4[]
+            ci, // -> int4[]
+            ld, // -> float8[]
+            vb, // -> bool[]  (NULL saved)
+            il, // -> text[]
+            "multi-insert"
+        );
+        if (!ins.ok)
+        {
+            std::cout << "[ERROR] INSERT array_test_multi: " << ins.error << "\n";
+            co_return;
+        }
+    }
+
+    {
+        auto q1 = co_await pool.query_awaitable("SELECT count(1) FROM array_test;");
+        if (!q1.ok)
+        {
+            std::cout << "[ERROR] SELECT array_test: " << q1.error << "\n";
+            co_return;
+        }
+        auto q2 = co_await pool.query_awaitable("SELECT count(1) FROM array_test_multi;");
+        if (!q2.ok)
+        {
+            std::cout << "[ERROR] SELECT array_test_multi: " << q2.error << "\n";
+            co_return;
+        }
+
+        std::cout << "array_test rows=" << (q1.rows.empty() ? "?" : q1.rows[0].cols[0])
+            << ", array_test_multi rows=" << (q2.rows.empty() ? "?" : q2.rows[0].cols[0]) << "\n";
+    }
+
+    co_return;
+}
+
 struct MyNotifyHandler
 {
     usub::uvent::task::Awaitable<void>
@@ -162,26 +269,28 @@ task::Awaitable<void> spawn_listener(usub::pg::PgPool& pool)
     co_return;
 }
 
-struct BalanceLogger : usub::pg::IPgNotifyHandler {
+struct BalanceLogger : usub::pg::IPgNotifyHandler
+{
     usub::uvent::task::Awaitable<void>
     operator()(std::string channel,
                std::string payload,
                int backend_pid) override
     {
         std::cout << "[BALANCE] pid=" << backend_pid
-                  << " payload=" << payload << "\n";
+            << " payload=" << payload << "\n";
         co_return;
     }
 };
 
-struct RiskAlerter : usub::pg::IPgNotifyHandler {
+struct RiskAlerter : usub::pg::IPgNotifyHandler
+{
     usub::uvent::task::Awaitable<void>
     operator()(std::string channel,
                std::string payload,
                int backend_pid) override
     {
         std::cout << "[RISK] pid=" << backend_pid
-                  << " payload=" << payload << "\n";
+            << " payload=" << payload << "\n";
         co_return;
     }
 };
@@ -210,7 +319,8 @@ usub::uvent::task::Awaitable<void> spawn_listener_multiplexer(usub::pg::PgPool& 
         std::make_shared<RiskAlerter>()
     );
 
-    if (!h1.has_value() || !h2.has_value()) {
+    if (!h1.has_value() || !h2.has_value())
+    {
         std::cout << "Failed to subscribe one or more channels\n";
         co_return;
     }
@@ -379,7 +489,7 @@ task::Awaitable<void> massive_ops_example(usub::pg::PgPool& pool)
                 if (row.cols.size() >= 2)
                 {
                     std::cout << "[CURSOR] id=" << row.cols[0]
-                              << " payload=" << row.cols[1] << std::endl;
+                        << " payload=" << row.cols[1] << std::endl;
                 }
                 else
                 {
@@ -433,12 +543,12 @@ int main()
             test_db_query(pool),
             threadIndex
         );
-
     });
 
     system::co_spawn(spawn_listener_multiplexer(pool));
     system::co_spawn(spawn_listener(pool));
     system::co_spawn(massive_ops_example(pool));
+    system::co_spawn(test_array_inserts(pool));
 
     uvent.run();
     return 0;
