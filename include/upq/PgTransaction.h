@@ -42,7 +42,7 @@ namespace usub::pg
 
         usub::uvent::task::Awaitable<bool> begin();
 
-        template <typename... Args>
+        template <bool Pipeline = false, typename... Args>
         usub::uvent::task::Awaitable<QueryResult>
         query(const std::string& sql, Args&&... args);
 
@@ -74,11 +74,11 @@ namespace usub::pg
             bool is_committed() const noexcept { return committed_; }
             bool is_rolled_back() const noexcept { return rolled_back_; }
 
-            template <typename... Args>
+            template <bool Pipeline = false, typename... Args>
             usub::uvent::task::Awaitable<QueryResult>
             query(const std::string& sql, Args&&... args)
             {
-                co_return co_await parent_.query(sql, std::forward<Args>(args)...);
+                co_return co_await parent_.query<Pipeline>(sql, std::forward<Args>(args)...);
             }
 
         private:
@@ -107,7 +107,7 @@ namespace usub::pg
         static std::string build_begin_sql(const PgTransactionConfig& cfg);
     };
 
-    template <typename... Args>
+    template <bool Pipeline, typename... Args>
     usub::uvent::task::Awaitable<QueryResult>
     PgTransaction::query(const std::string& sql, Args&&... args)
     {
@@ -139,7 +139,7 @@ namespace usub::pg
             co_return bad;
         }
 
-        QueryResult qr = co_await this->pool_->query_on(
+        QueryResult qr = co_await this->pool_->query_on<Pipeline>(
             this->conn_,
             sql,
             std::forward<Args>(args)...
