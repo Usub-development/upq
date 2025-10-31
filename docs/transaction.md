@@ -15,6 +15,7 @@ subtransactions (`SAVEPOINT`).
 - Commits or rolls back explicitly
 - Returns or retires the connection automatically
 - Supports **subtransactions** via `SAVEPOINT`
+- Supports **pipelined query execution** via compile-time toggle
 
 All methods are asynchronous and return `Awaitable`.
 
@@ -112,11 +113,39 @@ if (!qr.ok)
 }
 ```
 
-If the connection is lost mid-transaction:
+---
 
-* `qr.ok == false`
-* `qr.code == PgErrorCode::ConnectionClosed`
-* Transaction state automatically becomes inactive + rolled back.
+### Pipelined query execution
+
+You can optionally enable **pipeline mode** at compile time using a template flag `<true>`.
+
+```cpp
+auto r1 = co_await txn.query<true>("INSERT INTO logs(message) VALUES($1)", "A");
+auto r2 = co_await txn.query<true>("INSERT INTO logs(message) VALUES($1)", "B");
+```
+
+When `<true>` is passed:
+
+* Queries are sent using libpq's pipeline protocol (queued without waiting for individual results).
+* `PQsendQueryParams` is called back-to-back, and the driver performs a single flush.
+* A `pipelineSync` is automatically inserted after the last statement to collect results in order.
+
+This improves throughput for batch-like operations inside one transaction.
+
+When `<false>` (default):
+
+* Each query waits for its result before sending the next one.
+* Behavior is identical to traditional sequential PostgreSQL transactions.
+
+Use pipelining **only for independent statements** within the same transaction — it does *not* change transaction
+atomicity or isolation guarantees.
+
+---
+
+| Template flag | Description                                         |
+|---------------|-----------------------------------------------------|
+| `<false>`     | Default. Sequential per-query execution (safe).     |
+| `<true>`      | Pipeline mode. Batched sends with deferred results. |
 
 ---
 
@@ -208,3 +237,4 @@ If a subtransaction fails, the main transaction remains active unless you roll i
 | Auto invalidation      | Broken connections mark transaction rolled back  |
 | Subtransactions        | Nested `SAVEPOINT` support                       |
 | Structured errors      | Always returns `QueryResult`                     |
+| Pipeline execution     | Compile-time toggle `<true>` for batched queries |

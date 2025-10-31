@@ -1,6 +1,6 @@
 # PgPool
 
-`PgPool` is an asynchronous PostgreSQL connection pool.
+`PgPool` is an asynchronous PostgreSQL connection pool.  
 It manages live `PGconn` sockets, hands them out to coroutines, and safely recycles (or retires) them.
 
 Primary high-level entrypoint for queries in **upq**.
@@ -137,6 +137,36 @@ Both APIs return `QueryResult` with `ok`, `code`, `error`, `rows`, `rows_valid`.
 
 ---
 
+### Pipelined query execution
+
+All `query*()` methods support **PostgreSQL pipelining** via a compile-time template flag.
+
+Example:
+
+```cpp
+auto res1 = co_await pool.query_on<true>(conn, "INSERT INTO logs(msg) VALUES($1)", "first");
+auto res2 = co_await pool.query_on<true>(conn, "INSERT INTO logs(msg) VALUES($1)", "second");
+```
+
+When `<true>` is passed:
+
+* Commands are queued on the same connection without waiting for intermediate results.
+* The driver internally issues `PQsendQueryParams` back-to-back and flushes once.
+* After all queued commands, a `pipelineSync` is automatically performed to read results in order.
+
+Use this only when queries are **independent** — e.g. batch inserts or updates that do not rely on each other's results.
+
+Default behavior (`<false>` or omitted) is fully synchronous per query.
+
+---
+
+| Pipeline flag | Description                            |
+|---------------|----------------------------------------|
+| `<false>`     | Default. Waits for each result (safe). |
+| `<true>`      | Pipeline mode. Batches queries.        |
+
+---
+
 ## Bulk COPY (via `PgConnectionLibpq`)
 
 ```cpp
@@ -259,3 +289,4 @@ Pool self-heals by retiring broken connections and opening new ones on demand.
 | Health checks        | Optional periodic probes with `checked/alive/reconnected` stats |
 | COPY & cursors       | Via `PgConnectionLibpq`, safe to return to pool                 |
 | Structured errors    | Clear non-exceptional failure reporting                         |
+| Pipeline execution   | Compile-time toggle `<true>` for batched async queries          |
