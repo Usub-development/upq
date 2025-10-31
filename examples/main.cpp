@@ -412,7 +412,7 @@ int main()
         /*max_pool_size*/ 32,
         usub::pg::PgPoolHealthConfig{
             .enabled = true,
-            .interval_ms = 3000
+            .interval_ms = 30000
         }
     );
 

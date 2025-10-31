@@ -117,9 +117,25 @@ namespace usub::pg
         struct Row
         {
             std::vector<std::string> cols;
+
+            const std::string& operator[](size_t i) const noexcept {
+                return cols[i];
+            }
+
+            std::string& operator[](size_t i) noexcept {
+                return cols[i];
+            }
         };
 
         std::vector<Row> rows;
+
+        const Row& operator[](size_t i) const noexcept {
+            return rows[i];
+        }
+
+        Row& operator[](size_t i) noexcept {
+            return rows[i];
+        }
 
         bool ok{false};
         PgErrorCode code{PgErrorCode::Unknown};

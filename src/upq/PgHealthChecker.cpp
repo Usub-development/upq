@@ -21,16 +21,9 @@ namespace usub::pg
 
         for (;;)
         {
+            std::cout << "test" << std::endl;
             try
             {
-                PgPoolHealthConfig cur = cfg_;
-
-                if (!cur.enabled)
-                {
-                    co_await usub::uvent::system::this_coroutine::sleep_for(milliseconds(1000));
-                    continue;
-                }
-
                 this->stats_.iterations.fetch_add(1, std::memory_order_relaxed);
 
                 auto res = co_await pool_.query_awaitable("SELECT 1;");
@@ -38,12 +31,12 @@ namespace usub::pg
                 if (res.ok)
                 {
                     this->stats_.ok_checks.fetch_add(1, std::memory_order_relaxed);
-                    next_sleep = milliseconds(cur.interval_ms ? cur.interval_ms : 1000);
+                    next_sleep = milliseconds(this->cfg_.interval_ms ? this->cfg_.interval_ms : 1000);
                 }
                 else
                 {
                     this->stats_.failed_checks.fetch_add(1, std::memory_order_relaxed);
-                    auto backoff = std::min<uint64_t>(cur.interval_ms ? cur.interval_ms * 2 : 2000, 15000);
+                    auto backoff = std::min<uint64_t>(this->cfg_.interval_ms ? this->cfg_.interval_ms * 2 : 2000, 15000);
                     next_sleep = milliseconds(backoff);
                 }
             }
