@@ -27,6 +27,21 @@ task::Awaitable<void> test_db_query(usub::pg::PgPool& pool)
     }
 
     {
+        std::optional<std::string> password = std::nullopt;
+        auto res_schema = co_await pool.query_awaitable(
+            R"(INSERT INTO users (name, password) VALUES ($1, $2);)",
+            "Ivan",
+            password
+        );
+
+        if (!res_schema.ok)
+        {
+            std::cout << "[ERROR] SCHEMA INIT failed: " << res_schema.error << std::endl;
+            co_return;
+        }
+    }
+
+    {
         usub::pg::PgTransaction txn(&pool);
 
         bool ok_begin = co_await txn.begin();
@@ -401,7 +416,7 @@ int main()
 {
     settings::timeout_duration_ms = 5000;
 
-    usub::Uvent uvent(4);
+    usub::Uvent uvent(1);
 
     auto pool = usub::pg::PgPool(
         "localhost", // host
@@ -409,11 +424,7 @@ int main()
         "postgres", // user
         "postgres", // db
         "password", // password
-        /*max_pool_size*/ 32,
-        usub::pg::PgPoolHealthConfig{
-            .enabled = true,
-            .interval_ms = 30000
-        }
+        /*max_pool_size*/ 32
     );
 
     uvent.for_each_thread([&](int threadIndex, thread::ThreadLocalStorage* tls)
