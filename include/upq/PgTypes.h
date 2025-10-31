@@ -118,23 +118,30 @@ namespace usub::pg
         {
             std::vector<std::string> cols;
 
-            const std::string& operator[](size_t i) const noexcept {
+            const std::string& operator[](size_t i) const noexcept
+            {
                 return cols[i];
             }
 
-            std::string& operator[](size_t i) noexcept {
+            std::string& operator[](size_t i) noexcept
+            {
                 return cols[i];
             }
+
+            [[nodiscard]] inline size_t size() const noexcept { return this->cols.size(); }
+            [[nodiscard]] inline bool empty() const noexcept { return this->cols.empty(); }
         };
 
         std::vector<Row> rows;
 
-        const Row& operator[](size_t i) const noexcept {
-            return rows[i];
+        const Row& operator[](size_t i) const noexcept
+        {
+            return this->rows[i];
         }
 
-        Row& operator[](size_t i) noexcept {
-            return rows[i];
+        Row& operator[](size_t i) noexcept
+        {
+            return this->rows[i];
         }
 
         bool ok{false};
@@ -145,6 +152,13 @@ namespace usub::pg
         PgErrorDetail err_detail;
 
         bool rows_valid{true};
+
+        [[nodiscard]] inline bool empty() const noexcept { return this->ok && this->rows_valid && this->rows.empty(); }
+        [[nodiscard]] inline bool has_rows() const noexcept { return this->ok && this->rows_valid && !this->rows.empty(); }
+        [[nodiscard]] inline size_t row_count() const noexcept { return this->rows.size(); }
+        [[nodiscard]] inline size_t col_count() const noexcept { return this->rows.empty() ? 0 : this->rows[0].cols.size(); }
+
+        [[nodiscard]] inline bool invariant() const noexcept { return this->rows.empty() || !this->rows[0].cols.empty(); }
     };
 
     class QueryState : public utils::sync::refc::RefCounted<QueryState>
@@ -155,18 +169,11 @@ namespace usub::pg
 
         std::string sql;
 
-        std::mutex mtx;
-        std::condition_variable cv;
-
         std::coroutine_handle<> awaiting_coro{nullptr};
 
         std::atomic<bool> canceled{false};
         PgErrorCode cancel_code{PgErrorCode::OK};
         std::string cancel_reason;
-
-        void set_result(QueryResult&& r);
-
-        void set_canceled(PgErrorCode code, std::string msg);
     };
 
     class QueryAwaiter

@@ -5,68 +5,6 @@
 
 namespace usub::pg
 {
-    void QueryState::set_result(QueryResult&& r)
-    {
-        {
-            std::lock_guard lk(this->mtx);
-            this->result = std::move(r);
-            this->ready.store(true, std::memory_order_release);
-        }
-
-        this->cv.notify_all();
-
-        if (this->awaiting_coro)
-        {
-            auto h = this->awaiting_coro;
-            this->awaiting_coro = nullptr;
-            h.resume();
-        }
-    }
-
-    void QueryState::set_canceled(PgErrorCode code, std::string msg)
-    {
-        {
-            std::lock_guard lk(this->mtx);
-            this->canceled.store(true, std::memory_order_release);
-            this->cancel_code = code;
-            this->cancel_reason = std::move(msg);
-            this->ready.store(true, std::memory_order_release);
-        }
-
-        this->cv.notify_all();
-
-        if (this->awaiting_coro)
-        {
-            auto h = this->awaiting_coro;
-            this->awaiting_coro = nullptr;
-            h.resume();
-        }
-    }
-
-    QueryResult QueryFuture::wait()
-    {
-        if (!this->state)
-        {
-            QueryResult bad;
-            bad.ok = false;
-            bad.code = PgErrorCode::InvalidFuture;
-            bad.error = "invalid future";
-            bad.rows_valid = false;
-            return bad;
-        }
-
-        if (!this->state->ready.load(std::memory_order_acquire))
-        {
-            std::unique_lock lk(this->state->mtx);
-            this->state->cv.wait(lk, [&]
-            {
-                return this->state->ready.load(std::memory_order_acquire);
-            });
-        }
-
-        return this->state->result;
-    }
-
     void write_be32(uint8_t* dst, uint32_t v)
     {
         dst[0] = (v >> 24) & 0xFF;
