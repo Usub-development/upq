@@ -20,8 +20,6 @@
 #include <limits>
 #include <iterator>
 
-#include <libpq-fe.h>
-
 #include "uvent/Uvent.h"
 #include "PgTypes.h"
 #include "meta/PgConcepts.h"

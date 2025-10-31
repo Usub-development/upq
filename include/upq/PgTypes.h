@@ -17,6 +17,8 @@
 
 #include <openssl/md5.h>
 
+#include <libpq-fe.h>
+
 #include "uvent/Uvent.h"
 #include "uvent/utils/sync/RefCountedSession.h"
 
@@ -154,11 +156,23 @@ namespace usub::pg
         bool rows_valid{true};
 
         [[nodiscard]] inline bool empty() const noexcept { return this->ok && this->rows_valid && this->rows.empty(); }
-        [[nodiscard]] inline bool has_rows() const noexcept { return this->ok && this->rows_valid && !this->rows.empty(); }
-        [[nodiscard]] inline size_t row_count() const noexcept { return this->rows.size(); }
-        [[nodiscard]] inline size_t col_count() const noexcept { return this->rows.empty() ? 0 : this->rows[0].cols.size(); }
 
-        [[nodiscard]] inline bool invariant() const noexcept { return this->rows.empty() || !this->rows[0].cols.empty(); }
+        [[nodiscard]] inline bool has_rows() const noexcept
+        {
+            return this->ok && this->rows_valid && !this->rows.empty();
+        }
+
+        [[nodiscard]] inline size_t row_count() const noexcept { return this->rows.size(); }
+
+        [[nodiscard]] inline size_t col_count() const noexcept
+        {
+            return this->rows.empty() ? 0 : this->rows[0].cols.size();
+        }
+
+        [[nodiscard]] inline bool invariant() const noexcept
+        {
+            return this->rows.empty() || !this->rows[0].cols.empty();
+        }
     };
 
     class QueryState : public utils::sync::refc::RefCounted<QueryState>
@@ -418,6 +432,231 @@ namespace usub::pg
         std::string error;
         PgErrorDetail err_detail;
     };
+
+    // ---------- detail: OIDs + concepts ----------
+    namespace detail
+    {
+        // OIDs (pg_type.h)
+        constexpr Oid BOOLOID = 16;
+        constexpr Oid INT8OID = 20;
+        constexpr Oid INT2OID = 21;
+        constexpr Oid INT4OID = 23;
+        constexpr Oid TEXTOID = 25;
+        constexpr Oid FLOAT4OID = 700;
+        constexpr Oid FLOAT8OID = 701;
+
+        // array OIDs
+        constexpr Oid BOOLARRAYOID = 1000;
+        constexpr Oid INT2ARRAYOID = 1005;
+        constexpr Oid INT4ARRAYOID = 1007;
+        constexpr Oid TEXTARRAYOID = 1009;
+        constexpr Oid INT8ARRAYOID = 1016;
+        constexpr Oid FLOAT4ARRAYOID = 1021;
+        constexpr Oid FLOAT8ARRAYOID = 1022;
+
+        template <class T>
+        using Decay = std::decay_t<T>;
+
+        // scalar concepts
+        template <class T> concept StringLike =
+            std::is_same_v<Decay<T>, std::string> ||
+            std::is_same_v<Decay<T>, std::string_view>;
+
+        template <class T> concept CharPtr =
+            std::is_same_v<Decay<T>, const char*> || std::is_same_v<Decay<T>, char*>;
+
+        template <class T> concept Integral = std::is_integral_v<Decay<T>> && !std::is_same_v<Decay<T>, bool>;
+        template <class T> concept Floating = std::is_floating_point_v<Decay<T>>;
+
+        template <class T> concept Optional =
+            requires { typename Decay<T>::value_type; } &&
+            std::is_same_v<Decay<T>, std::optional<typename Decay<T>::value_type>>;
+
+        template <class T>
+        concept Streamable = requires(std::ostream& os, const T& v) { { os << v } -> std::same_as<std::ostream&>; };
+
+        // container detectors
+        template <class, class = void>
+        struct has_mapped_type : std::false_type
+        {
+        };
+
+        template <class T>
+        struct has_mapped_type<T, std::void_t<typename T::mapped_type>> : std::true_type
+        {
+        };
+
+        template <class T>
+        inline constexpr bool has_mapped_type_v = has_mapped_type<T>::value;
+
+        template <class T>
+        concept AssociativeLike = has_mapped_type_v<Decay<T>> || (requires { typename Decay<T>::key_type; });
+
+        template <class T>
+        concept HasBeginEnd = requires(T& t)
+        {
+            { std::begin(t) } -> std::input_or_output_iterator;
+            { std::end(t) } -> std::sentinel_for<decltype(std::begin(t))>;
+        };
+
+        template <class T>
+        concept HasSize = requires(const T& t) { { t.size() } -> std::convertible_to<size_t>; };
+
+        // init_list detector to exclude from ArrayLike
+        template <class T>
+        concept InitList =
+            requires { typename Decay<T>::value_type; } &&
+            std::is_same_v<Decay<T>, std::initializer_list<typename Decay<T>::value_type>>;
+
+        template <class T>
+        concept ArrayLike =
+            HasBeginEnd<T> &&
+            !StringLike<T> &&
+            !CharPtr<T> &&
+            !AssociativeLike<T> &&
+            !InitList<T> &&
+            requires { typename Decay<T>::value_type; };
+
+        // FIX: detect C-arrays on the original type (not decay) to catch T(&)[N]
+        template <class T>
+        concept CArrayLike = std::is_array_v<std::remove_reference_t<T>>;
+
+        // ---------- PG array literal helpers ----------
+        inline void pg_array_escape_elem(std::string& out, std::string_view s)
+        {
+            out.push_back('"');
+            for (char ch : s)
+            {
+                if (ch == '"' || ch == '\\') out.push_back('\\');
+                out.push_back(ch);
+            }
+            out.push_back('"');
+        }
+
+        template <class Cnt>
+        inline size_t guess_array_reserve(const Cnt& c)
+        {
+            if constexpr (HasSize<Cnt>) return 2 + c.size() * 8;
+            else return 64;
+        }
+
+        template <class T>
+        inline void write_array_scalar(std::string& out, const T& v)
+        {
+            if constexpr (Optional<T>)
+            {
+                if (!v)
+                {
+                    out += "NULL";
+                    return;
+                }
+                write_array_scalar(out, *v);
+            }
+            else if constexpr (std::is_same_v<Decay<T>, bool>)
+            {
+                out += (v ? "t" : "f");
+            }
+            else if constexpr (Integral<T>)
+            {
+                if constexpr (std::is_same_v<Decay<T>, long long> || std::is_same_v<Decay<T>, unsigned long long>)
+                    out += std::to_string(v);
+                else
+                    out += std::to_string(static_cast<long long>(v));
+            }
+            else if constexpr (Floating<T>)
+            {
+                out += std::to_string(static_cast<long double>(v));
+            }
+            else if constexpr (StringLike<T>)
+            {
+                pg_array_escape_elem(out, std::string_view(v));
+            }
+            else if constexpr (CharPtr<T>)
+            {
+                if (v) pg_array_escape_elem(out, std::string_view(v, std::char_traits<char>::length(v)));
+                else out += "NULL";
+            }
+            else if constexpr (std::is_pointer_v<Decay<T>>)
+            {
+                static_assert(!std::is_pointer_v<Decay<T>>,
+                              "Unsupported pointer element in array (only char* allowed)");
+            }
+            else if constexpr (Streamable<T>)
+            {
+                std::ostringstream oss;
+                oss << v;
+                pg_array_escape_elem(out, oss.str());
+            }
+            else
+            {
+                std::ostringstream oss;
+                oss << "<elem:" << typeid(Decay<T>).name() << ">";
+                pg_array_escape_elem(out, oss.str());
+            }
+        }
+
+        template <class Range>
+        inline std::string build_pg_array_from_range(const Range& r)
+        {
+            std::string buf;
+            buf.reserve(guess_array_reserve(r));
+            buf.push_back('{');
+            bool first = true;
+            for (auto&& e : r)
+            {
+                if (!first) buf.push_back(',');
+                first = false;
+                write_array_scalar(buf, e);
+            }
+            buf.push_back('}');
+            return buf;
+        }
+
+        template <class T, size_t N>
+        inline std::string build_pg_array_from_carray(const T (&a)[N])
+        {
+            std::string buf;
+            buf.reserve(2 + N * 8);
+            buf.push_back('{');
+            for (size_t i = 0; i < N; ++i)
+            {
+                if (i) buf.push_back(',');
+                write_array_scalar(buf, a[i]);
+            }
+            buf.push_back('}');
+            return buf;
+        }
+
+        template <class Elem>
+        consteval Oid pick_array_oid()
+        {
+            if constexpr (std::is_same_v<Decay<Elem>, bool>) return BOOLARRAYOID;
+            else if constexpr (Integral<Elem>)
+            {
+                if constexpr (sizeof(Decay<Elem>) <= 2) return INT2ARRAYOID;
+                else if constexpr (sizeof(Decay<Elem>) == 4) return INT4ARRAYOID;
+                else return INT8ARRAYOID;
+            }
+            else if constexpr (std::is_same_v<Decay<Elem>, float>) return FLOAT4ARRAYOID;
+            else if constexpr (std::is_same_v<Decay<Elem>, double>) return FLOAT8ARRAYOID;
+            else return TEXTARRAYOID;
+        }
+
+        template <class T>
+        struct unopt
+        {
+            using type = T;
+        };
+
+        template <class U>
+        struct unopt<std::optional<U>>
+        {
+            using type = U;
+        };
+
+        template <class T>
+        using unopt_t = typename unopt<Decay<T>>::type;
+    } // namespace detail
 } // namespace usub::pg
 
 #endif
