@@ -659,6 +659,8 @@ namespace usub::pg
         template <class T>
         using unopt_t = typename unopt<Decay<T>>::type;
     } // namespace detail
+
+    class PgConnectionLibpq;
 } // namespace usub::pg
 
 #endif

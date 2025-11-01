@@ -24,6 +24,7 @@
 #include "uvent/Uvent.h"
 #include "PgTypes.h"
 #include "meta/PgConcepts.h"
+#include "PgReflect.h" // is_tuple_like_v, ReflectAggregate, мапперы чтения
 
 namespace usub::pg
 {
@@ -127,7 +128,7 @@ namespace usub::pg
             const auto i = (*idx)++;
             temp_strings.emplace_back(sv);
             values[i] = temp_strings.back().c_str();
-            lengths[i] = (int)sv.size();
+            lengths[i] = static_cast<int>(sv.size());
             formats[i] = 0;
             types[i] = 0; // TEXT inferred
         }
@@ -137,9 +138,9 @@ namespace usub::pg
             const auto i = (*idx)++;
             temp_strings.emplace_back(sv);
             values[i] = temp_strings.back().c_str();
-            lengths[i] = (int)sv.size();
-            formats[i] = 0; // text format
-            types[i] = oid; // explicit type
+            lengths[i] = static_cast<int>(sv.size());
+            formats[i] = 0; // text
+            types[i] = oid; // explicit
         }
 
         template <class BinT>
@@ -151,7 +152,7 @@ namespace usub::pg
             buf.resize(n);
             std::memcpy(buf.data(), data, n);
             values[i] = buf.data();
-            lengths[i] = (int)n;
+            lengths[i] = static_cast<int>(n);
             formats[i] = 1; // binary
             types[i] = oid;
         }
@@ -233,7 +234,7 @@ namespace usub::pg
             else encode_one(ps, *ov);
         }
 
-        // ----- контейнеры → PG array (text literal с явным типом) -----
+        // ----- контейнеры → PG array (один параметр) -----
         template <ArrayLike C>
         inline void encode_one(ParamSlices& ps, const C& cont)
         {
@@ -269,11 +270,42 @@ namespace usub::pg
             ps.set_text_typed(s, arr_oid);
         }
 
+        // ---- tuple-like → разворачиваем элементы в несколько SQL-параметров
+        template <class Tup>
+            requires (::usub::pg::detail::is_tuple_like_v<std::decay_t<Tup>> &&
+                !ArrayLike<std::decay_t<Tup>> &&
+                !CArrayLike<std::decay_t<Tup>>)
+        inline void encode_one(ParamSlices& ps, const Tup& tup)
+        {
+            using DT = std::decay_t<Tup>;
+            [&]<std::size_t... I>(std::index_sequence<I...>)
+            {
+                (encode_one(ps, std::get<I>(tup)), ...);
+            }(std::make_index_sequence<std::tuple_size_v<DT>>{});
+        }
+
+        // ---- рефлексируемый агрегат → разворачиваем поля в несколько SQL-параметров
+        template <class T>
+            requires (::usub::pg::detail::ReflectAggregate<std::decay_t<T>> &&
+                !::usub::pg::detail::is_tuple_like_v<std::decay_t<T>> &&
+                !ArrayLike<std::decay_t<T>> &&
+                !CArrayLike<std::decay_t<T>>)
+        inline void encode_one(ParamSlices& ps, const T& obj)
+        {
+            using V = std::decay_t<T>;
+            auto& nonconst = const_cast<V&>(obj);
+            auto tiev = ureflect::to_tie(nonconst);
+            [&]<std::size_t... I>(std::index_sequence<I...>)
+            {
+                (encode_one(ps, ureflect::get<I>(tiev)), ...);
+            }(std::make_index_sequence<ureflect::count_members<V>>{});
+        }
+
         // --- fallback ---
         template <class T>
             requires (!Integral<T> && !Floating<T> && !StringLike<T> && !CharPtr<T> &&
                 !Optional<T> && !ArrayLike<T> && !CArrayLike<T> &&
-                !AssociativeLike<T> && !std::is_same_v<Decay<T>, bool> &&
+                !AssociativeLike<T> && !std::is_same_v<std::decay_t<T>, bool> &&
                 !InitList<T>)
         inline void encode_one(ParamSlices& ps, T&& v)
         {
@@ -285,9 +317,10 @@ namespace usub::pg
             {
                 ps.set_text(std::string(std::forward<T>(v)));
             }
-            else if constexpr (std::is_pointer_v<Decay<T>>)
+            else if constexpr (std::is_pointer_v<std::decay_t<T>>)
             {
-                static_assert(!std::is_pointer_v<Decay<T>>, "Unsupported pointer parameter (only char* allowed)");
+                static_assert(!std::is_pointer_v<std::decay_t<T>>,
+                              "Unsupported pointer parameter (only char* allowed)");
             }
             else if constexpr (Streamable<T>)
             {
@@ -298,9 +331,72 @@ namespace usub::pg
             else
             {
                 std::ostringstream oss;
-                oss << "<param:" << typeid(Decay<T>).name() << ">";
+                oss << "<param:" << typeid(std::decay_t<T>).name() << ">";
                 ps.set_text(oss.str());
             }
+        }
+
+        // ---- param arity ----
+        template <class T>
+        struct param_arity_impl
+        {
+            static constexpr size_t value = 1;
+        };
+
+        template <class Opt>
+            requires Optional<Opt>
+        struct param_arity_impl<Opt>
+        {
+            static constexpr size_t value = 1;
+        };
+
+        template <class C>
+            requires ArrayLike<C>
+        struct param_arity_impl<C>
+        {
+            static constexpr size_t value = 1;
+        };
+
+        template <class T, size_t N>
+        struct param_arity_impl<T[N]>
+        {
+            static constexpr size_t value = 1;
+        };
+
+        template <class T>
+        struct param_arity_impl<std::initializer_list<T>>
+        {
+            static constexpr size_t value = 1;
+        };
+
+        template <class Tup>
+            requires (::usub::pg::detail::is_tuple_like_v<Tup> &&
+                !ArrayLike<Tup> &&
+                !CArrayLike<Tup>)
+        struct param_arity_impl<Tup>
+        {
+            static constexpr size_t value = std::tuple_size_v<std::decay_t<Tup>>;
+        };
+
+        template <class T>
+            requires (::usub::pg::detail::ReflectAggregate<T> &&
+                !::usub::pg::detail::is_tuple_like_v<T> &&
+                !ArrayLike<T> &&
+                !CArrayLike<T>)
+        struct param_arity_impl<T>
+        {
+            static constexpr size_t value = ureflect::count_members<std::decay_t<T>>;
+        };
+
+        template <class T>
+        struct param_arity : param_arity_impl<std::decay_t<T>>
+        {
+        };
+
+        template <class... Args>
+        constexpr size_t count_total_params()
+        {
+            return (param_arity<Args>::value + ... + 0);
         }
     } // namespace detail
 
@@ -329,6 +425,33 @@ namespace usub::pg
         template <typename... Args>
         usub::uvent::task::Awaitable<QueryResult>
         exec_param_query_nonblocking(const std::string& sql, Args&&... args);
+
+        // reflect-aware SELECT → std::vector<T>
+        template <class T>
+        usub::uvent::task::Awaitable<std::vector<T>>
+        exec_simple_query_nonblocking(const std::string& sql)
+        {
+            using Fn = usub::uvent::task::Awaitable<usub::pg::QueryResult>
+                (PgConnectionLibpq::*)(const std::string&);
+            Fn base = &PgConnectionLibpq::exec_simple_query_nonblocking;
+
+            usub::pg::QueryResult qr = co_await (this->*base)(sql);
+            co_return usub::pg::map_all_reflect_positional<T>(qr);
+        }
+
+        // reflect-aware SELECT one → std::optional<T>
+        template <class T>
+        usub::uvent::task::Awaitable<std::optional<T>>
+        exec_simple_query_one_nonblocking(const std::string& sql)
+        {
+            using Fn = usub::uvent::task::Awaitable<usub::pg::QueryResult>
+                (PgConnectionLibpq::*)(const std::string&);
+            Fn base = &PgConnectionLibpq::exec_simple_query_nonblocking;
+
+            usub::pg::QueryResult qr = co_await (this->*base)(sql);
+            if (qr.rows.empty()) co_return std::nullopt;
+            co_return usub::pg::map_single_reflect_positional<T>(qr, 0);
+        }
 
         usub::uvent::task::Awaitable<PgCopyResult> copy_in_start(const std::string& sql);
         usub::uvent::task::Awaitable<PgCopyResult> copy_in_send_chunk(const void* data, size_t len);
@@ -370,14 +493,13 @@ namespace usub::pg
         uint64_t cursor_seq_{0};
     };
 
-    // ---------- impl: exec_param_query_nonblocking ----------
     template <typename... Args>
     usub::uvent::task::Awaitable<QueryResult>
     PgConnectionLibpq::exec_param_query_nonblocking(const std::string& sql, Args&&... args)
     {
         QueryResult out{};
         out.ok = false;
-        out.rows_affected = 0; // [aff-fix]
+        out.rows_affected = 0;
 
         if (!connected())
         {
@@ -386,29 +508,39 @@ namespace usub::pg
             co_return out;
         }
 
-        constexpr size_t N = sizeof...(Args);
-        const char* values[N == 0 ? 1 : N];
-        int lengths[N == 0 ? 1 : N];
-        int formats[N == 0 ? 1 : N];
-        Oid types[N == 0 ? 1 : N];
+        // учитываем tuple/aggregate, массивы и т.п.
+        constexpr size_t M = detail::count_total_params<Args...>();
+
+        std::vector<const char*> values(M ? M : 1, nullptr);
+        std::vector<int> lengths(M ? M : 1, 0);
+        std::vector<int> formats(M ? M : 1, 0);
+        std::vector<Oid> types(M ? M : 1, 0);
 
         std::vector<std::string> temp_strings;
-        temp_strings.reserve(N > 0 ? N : 1);
+        temp_strings.reserve(M ? M : 1);
         std::vector<std::vector<char>> temp_bytes;
-        temp_bytes.reserve(N > 0 ? N : 1);
+        temp_bytes.reserve(M ? M : 1);
 
         size_t idx = 0;
-        ParamSlices ps{values, lengths, formats, types, &idx, temp_strings, temp_bytes};
+        ParamSlices ps{
+            values.data(), lengths.data(), formats.data(), types.data(), &idx,
+            temp_strings, temp_bytes
+        };
+
+        // каждый аргумент может добавить 1..N params
         (detail::encode_one(ps, std::forward<Args>(args)), ...);
 
-        if (!PQsendQueryParams(conn_, sql.c_str(), static_cast<int>(N),
-                               types, values, lengths, formats, 0))
+        const int nParams = static_cast<int>(idx);
+
+        if (!PQsendQueryParams(conn_, sql.c_str(), nParams,
+                               types.data(), values.data(), lengths.data(), formats.data(), 0))
         {
             out.code = PgErrorCode::SocketReadFailed;
             out.error = PQerrorMessage(conn_);
             co_return out;
         }
 
+        // flush
         for (;;)
         {
             const int fr = PQflush(conn_);
@@ -422,6 +554,7 @@ namespace usub::pg
             co_await wait_writable();
         }
 
+        // pump & drain
         for (;;)
         {
             if (PQconsumeInput(conn_) == 0)
@@ -461,13 +594,13 @@ namespace usub::pg
                     out.ok = true;
                     out.code = PgErrorCode::OK;
                     if (out.rows_affected == 0)
-                        out.rows_affected = static_cast<uint64_t>(nrows); // [aff-fix]
+                        out.rows_affected = static_cast<uint64_t>(nrows);
                 }
                 else if (st == PGRES_COMMAND_OK)
                 {
                     out.ok = true;
                     out.code = PgErrorCode::OK;
-                    out.rows_affected += extract_rows_affected(res); // [aff-fix]
+                    out.rows_affected += extract_rows_affected(res);
                 }
                 else
                 {

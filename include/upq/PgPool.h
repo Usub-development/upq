@@ -44,6 +44,7 @@ namespace usub::pg
         usub::uvent::task::Awaitable<void>
         release_connection_async(std::shared_ptr<PgConnectionLibpq> conn);
 
+        // ---------- существующее API ----------
         template <typename... Args>
         usub::uvent::task::Awaitable<QueryResult>
         query_on(std::shared_ptr<PgConnectionLibpq> const& conn,
@@ -53,6 +54,36 @@ namespace usub::pg
         template <typename... Args>
         usub::uvent::task::Awaitable<QueryResult>
         query_awaitable(const std::string& sql, Args&&... args);
+
+        // ---------- [reflect] ЧТЕНИЕ: SELECT → vector<T>/optional<T> ----------
+        // map по позициям: SELECT cols...;  -> fields в порядке объявления у T или tuple
+        template <class T>
+        usub::uvent::task::Awaitable<std::vector<T>>
+        query_on_reflect(std::shared_ptr<PgConnectionLibpq> const& conn,
+                         const std::string& sql);
+
+        template <class T>
+        usub::uvent::task::Awaitable<std::optional<T>>
+        query_on_reflect_one(std::shared_ptr<PgConnectionLibpq> const& conn,
+                             const std::string& sql);
+
+        template <class T>
+        usub::uvent::task::Awaitable<std::vector<T>>
+        query_reflect(const std::string& sql);
+
+        template <class T>
+        usub::uvent::task::Awaitable<std::optional<T>>
+        query_reflect_one(const std::string& sql);
+
+        template <class Obj>
+        usub::uvent::task::Awaitable<QueryResult>
+        exec_reflect_on(std::shared_ptr<PgConnectionLibpq> const& conn,
+                        const std::string& sql,
+                        const Obj& obj);
+
+        template <class Obj>
+        usub::uvent::task::Awaitable<QueryResult>
+        exec_reflect(const std::string& sql, const Obj& obj);
 
         inline std::string host() { return this->host_; }
         inline std::string port() { return this->port_; }
@@ -140,6 +171,80 @@ namespace usub::pg
         co_await release_connection_async(conn);
         co_return qr;
     }
-}
+
+    template <class T>
+    usub::uvent::task::Awaitable<std::vector<T>>
+    PgPool::query_on_reflect(std::shared_ptr<PgConnectionLibpq> const& conn,
+                             const std::string& sql)
+    {
+        if (!conn || !conn->connected())
+            co_return std::vector<T>{};
+
+        auto rows = co_await conn->exec_simple_query_nonblocking<T>(sql);
+        co_return rows;
+    }
+
+    template <class T>
+    usub::uvent::task::Awaitable<std::optional<T>>
+    PgPool::query_on_reflect_one(std::shared_ptr<PgConnectionLibpq> const& conn,
+                                 const std::string& sql)
+    {
+        if (!conn || !conn->connected())
+            co_return std::nullopt;
+
+        auto row = co_await conn->exec_simple_query_one_nonblocking<T>(sql);
+        co_return row;
+    }
+
+    template <class T>
+    usub::uvent::task::Awaitable<std::vector<T>>
+    PgPool::query_reflect(const std::string& sql)
+    {
+        auto conn = co_await acquire_connection();
+        auto rows = co_await query_on_reflect<T>(conn, sql);
+        co_await release_connection_async(conn);
+        co_return rows;
+    }
+
+    template <class T>
+    usub::uvent::task::Awaitable<std::optional<T>>
+    PgPool::query_reflect_one(const std::string& sql)
+    {
+        auto conn = co_await acquire_connection();
+        auto row = co_await query_on_reflect_one<T>(conn, sql);
+        co_await release_connection_async(conn);
+        co_return row;
+    }
+
+    template <class Obj>
+    usub::uvent::task::Awaitable<QueryResult>
+    PgPool::exec_reflect_on(std::shared_ptr<PgConnectionLibpq> const& conn,
+                            const std::string& sql,
+                            const Obj& obj)
+    {
+        if (!conn || !conn->connected())
+        {
+            QueryResult bad;
+            bad.ok = false;
+            bad.code = PgErrorCode::ConnectionClosed;
+            bad.error = "connection invalid";
+            bad.rows_valid = false;
+            co_return bad;
+        }
+
+        QueryResult qr = co_await conn->exec_param_query_nonblocking(sql, obj);
+        co_return qr;
+    }
+
+    template <class Obj>
+    usub::uvent::task::Awaitable<QueryResult>
+    PgPool::exec_reflect(const std::string& sql, const Obj& obj)
+    {
+        auto conn = co_await acquire_connection();
+        auto qr = co_await exec_reflect_on(conn, sql, obj);
+        co_await release_connection_async(conn);
+        co_return qr;
+    }
+} // namespace usub::pg
 
 #endif
