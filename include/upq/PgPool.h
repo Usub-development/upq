@@ -44,13 +44,13 @@ namespace usub::pg
         usub::uvent::task::Awaitable<void>
         release_connection_async(std::shared_ptr<PgConnectionLibpq> conn);
 
-        template <bool Pipeline = false, typename... Args>
+        template <typename... Args>
         usub::uvent::task::Awaitable<QueryResult>
         query_on(std::shared_ptr<PgConnectionLibpq> const& conn,
                  const std::string& sql,
                  Args&&... args);
 
-        template <bool Pipeline = false, typename... Args>
+        template <typename... Args>
         usub::uvent::task::Awaitable<QueryResult>
         query_awaitable(const std::string& sql, Args&&... args);
 
@@ -94,7 +94,7 @@ namespace usub::pg
         std::unique_ptr<PgHealthChecker> health_checker_;
     };
 
-    template <bool Pipeline, typename... Args>
+    template <typename... Args>
     usub::uvent::task::Awaitable<QueryResult>
     PgPool::query_on(std::shared_ptr<PgConnectionLibpq> const& conn,
                      const std::string& sql,
@@ -117,7 +117,7 @@ namespace usub::pg
         }
         else
         {
-            QueryResult qr = co_await conn->exec_param_query_nonblocking<Pipeline>(
+            QueryResult qr = co_await conn->exec_param_query_nonblocking(
                 sql,
                 std::forward<Args>(args)...
             );
@@ -125,13 +125,13 @@ namespace usub::pg
         }
     }
 
-    template <bool Pipeline, typename... Args>
+    template <typename... Args>
     usub::uvent::task::Awaitable<QueryResult>
     PgPool::query_awaitable(const std::string& sql, Args&&... args)
     {
         auto conn = co_await acquire_connection();
 
-        QueryResult qr = co_await query_on<Pipeline>(
+        QueryResult qr = co_await query_on(
             conn,
             sql,
             std::forward<Args>(args)...

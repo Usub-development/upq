@@ -19,6 +19,7 @@
 #include <cstring>
 #include <limits>
 #include <iterator>
+#include <cctype>
 
 #include "uvent/Uvent.h"
 #include "PgTypes.h"
@@ -51,6 +52,23 @@ namespace usub::pg
         out.ok = false;
         out.code = PgErrorCode::ServerError;
         out.rows_valid = false;
+    }
+
+    static inline uint64_t extract_rows_affected(PGresult* res)
+    {
+        if (!res) return 0;
+        if (const char* aff = PQcmdTuples(res); aff && *aff)
+            return std::strtoull(aff, nullptr, 10);
+
+        if (const char* tag = PQcmdStatus(res); tag && *tag)
+        {
+            const char* end = tag + std::strlen(tag);
+            while (end > tag && std::isspace(static_cast<unsigned char>(*(end - 1)))) --end;
+            const char* p = end;
+            while (p > tag && std::isdigit(static_cast<unsigned char>(*(p - 1)))) --p;
+            if (p < end) return std::strtoull(p, nullptr, 10);
+        }
+        return 0;
     }
 
     // ---------- endian helpers ----------
@@ -114,7 +132,6 @@ namespace usub::pg
             types[i] = 0; // TEXT inferred
         }
 
-        // текстовый параметр с явным типом (например, text[])
         void set_text_typed(std::string_view sv, Oid oid)
         {
             const auto i = (*idx)++;
@@ -237,14 +254,12 @@ namespace usub::pg
             ps.set_text_typed(s, arr_oid);
         }
 
-        // C-массив T[N] (неконстантный) — форвард на const-версию
         template <class T, size_t N>
         inline void encode_one(ParamSlices& ps, T (&arr)[N])
         {
             encode_one(ps, const_cast<const T(&)[N]>(arr));
         }
 
-        // --- initializer_list<T> как PG-массив (приоритетный оверлоад) ---
         template <class T>
         inline void encode_one(ParamSlices& ps, std::initializer_list<T> il)
         {
@@ -311,7 +326,7 @@ namespace usub::pg
         usub::uvent::task::Awaitable<QueryResult>
         exec_simple_query_nonblocking(const std::string& sql);
 
-        template <bool Pipeline = false, typename... Args>
+        template <typename... Args>
         usub::uvent::task::Awaitable<QueryResult>
         exec_param_query_nonblocking(const std::string& sql, Args&&... args);
 
@@ -356,29 +371,19 @@ namespace usub::pg
     };
 
     // ---------- impl: exec_param_query_nonblocking ----------
-    template <bool Pipeline, typename... Args>
+    template <typename... Args>
     usub::uvent::task::Awaitable<QueryResult>
     PgConnectionLibpq::exec_param_query_nonblocking(const std::string& sql, Args&&... args)
     {
         QueryResult out{};
         out.ok = false;
-        out.code = PgErrorCode::Unknown;
-        out.rows_valid = true;
+        out.rows_affected = 0; // [aff-fix]
 
         if (!connected())
         {
-            out.ok = false;
             out.code = PgErrorCode::ConnectionClosed;
             out.error = "connection not OK";
-            out.rows_valid = false;
             co_return out;
-        }
-
-        bool entered = false;
-        if constexpr (Pipeline)
-        {
-            if (PQpipelineStatus(conn_) != PQ_PIPELINE_ON)
-                entered = (PQenterPipelineMode(conn_) == 1);
         }
 
         constexpr size_t N = sizeof...(Args);
@@ -397,43 +402,32 @@ namespace usub::pg
         (detail::encode_one(ps, std::forward<Args>(args)), ...);
 
         if (!PQsendQueryParams(conn_, sql.c_str(), static_cast<int>(N),
-                               types, values, lengths, formats, /*resultFormat=*/0))
+                               types, values, lengths, formats, 0))
         {
-            out.ok = false;
             out.code = PgErrorCode::SocketReadFailed;
             out.error = PQerrorMessage(conn_);
-            out.rows_valid = false;
-            if constexpr (Pipeline) { if (entered) PQexitPipelineMode(conn_); }
             co_return out;
         }
 
-        // flush
         for (;;)
         {
             const int fr = PQflush(conn_);
             if (fr == 0) break;
             if (fr == -1)
             {
-                out.ok = false;
                 out.code = PgErrorCode::SocketReadFailed;
                 out.error = PQerrorMessage(conn_);
-                out.rows_valid = false;
-                if constexpr (Pipeline) { if (entered) PQexitPipelineMode(conn_); }
                 co_return out;
             }
             co_await wait_writable();
         }
 
-        // read: consume → drain results → if busy await, else finish
         for (;;)
         {
             if (PQconsumeInput(conn_) == 0)
             {
-                out.ok = false;
                 out.code = PgErrorCode::SocketReadFailed;
                 out.error = PQerrorMessage(conn_);
-                out.rows_valid = false;
-                if constexpr (Pipeline) { if (entered) PQexitPipelineMode(conn_); }
                 co_return out;
             }
 
@@ -466,13 +460,14 @@ namespace usub::pg
                     }
                     out.ok = true;
                     out.code = PgErrorCode::OK;
-                    out.rows_valid = true;
+                    if (out.rows_affected == 0)
+                        out.rows_affected = static_cast<uint64_t>(nrows); // [aff-fix]
                 }
                 else if (st == PGRES_COMMAND_OK)
                 {
                     out.ok = true;
                     out.code = PgErrorCode::OK;
-                    out.rows_valid = true;
+                    out.rows_affected += extract_rows_affected(res); // [aff-fix]
                 }
                 else
                 {
@@ -487,12 +482,9 @@ namespace usub::pg
                 {
                     out.ok = true;
                     out.code = PgErrorCode::OK;
-                    out.rows_valid = true;
                 }
-                if constexpr (Pipeline) { if (entered) PQexitPipelineMode(conn_); }
                 co_return out;
             }
-
             co_await wait_readable();
         }
     }

@@ -22,7 +22,6 @@ namespace usub::pg
         out.ok = false;
         out.code = PgErrorCode::ServerError;
 
-        // optional: keep sqlstate in a generic text for diagnostics
         if (sqlstate && *sqlstate)
         {
             if (!out.error.empty())
@@ -72,35 +71,21 @@ namespace usub::pg
     static inline QueryResult pgresult_to_QueryResult(PGresult* res)
     {
         QueryResult out;
-        out.ok = false;
-        out.code = PgErrorCode::Unknown;
-        out.rows_valid = true;
+        out.rows_affected = 0; // [aff-fix]
 
-        if (!res)
-        {
-            out.ok = true;
-            out.code = PgErrorCode::OK;
-            out.rows_valid = true;
-            return out;
-        }
+        if (!res) return out;
 
-        ExecStatusType st = PQresultStatus(res);
+        const ExecStatusType st = PQresultStatus(res);
         if (st == PGRES_TUPLES_OK)
         {
             const int nrows = PQntuples(res);
             const int ncols = PQnfields(res);
-
-            if (nrows > 0) out.rows.reserve(static_cast<size_t>(nrows));
             for (int r = 0; r < nrows; ++r)
             {
                 QueryResult::Row row;
-                row.cols.reserve(ncols);
                 for (int c = 0; c < ncols; ++c)
                 {
-                    if (PQgetisnull(res, r, c))
-                    {
-                        row.cols.emplace_back();
-                    }
+                    if (PQgetisnull(res, r, c)) row.cols.emplace_back();
                     else
                     {
                         const char* v = PQgetvalue(res, r, c);
@@ -110,22 +95,21 @@ namespace usub::pg
                 }
                 out.rows.emplace_back(std::move(row));
             }
-
             out.ok = true;
             out.code = PgErrorCode::OK;
-            out.rows_valid = true;
+            if (out.rows_affected == 0)
+                out.rows_affected = static_cast<uint64_t>(nrows); // [aff-fix]
         }
         else if (st == PGRES_COMMAND_OK)
         {
             out.ok = true;
             out.code = PgErrorCode::OK;
-            out.rows_valid = true;
+            out.rows_affected = extract_rows_affected(res); // [aff-fix]
         }
         else
         {
             fill_server_error_fields(res, out);
         }
-
         return out;
     }
 
@@ -316,6 +300,7 @@ namespace usub::pg
         final_out.ok = true;
         final_out.code = PgErrorCode::OK;
         final_out.rows_valid = true;
+        final_out.rows_affected = 0; // [aff]
 
         while (PGresult* res = PQgetResult(conn_))
         {
@@ -326,11 +311,16 @@ namespace usub::pg
             {
                 final_out = std::move(tmp);
             }
-            else if (tmp.rows_valid && !tmp.rows.empty())
+            else
             {
-                // append rows
-                final_out.rows.reserve(final_out.rows.size() + tmp.rows.size());
-                for (auto& r : tmp.rows) final_out.rows.emplace_back(std::move(r));
+                final_out.rows_affected += tmp.rows_affected; // [aff]
+
+                if (tmp.rows_valid && !tmp.rows.empty())
+                {
+                    // append rows
+                    final_out.rows.reserve(final_out.rows.size() + tmp.rows.size());
+                    for (auto& r : tmp.rows) final_out.rows.emplace_back(std::move(r));
+                }
             }
         }
 
@@ -411,6 +401,7 @@ namespace usub::pg
         ok.ok = true;
         ok.code = PgErrorCode::OK;
         ok.rows_valid = true;
+        ok.rows_affected = 0; // [aff]
         return ok;
     }
 
@@ -422,6 +413,7 @@ namespace usub::pg
         out.ok = false;
         out.code = PgErrorCode::Unknown;
         out.rows_valid = true;
+        out.rows_affected = 0; // [aff]
 
         if (!connected())
         {
@@ -681,7 +673,6 @@ namespace usub::pg
             co_return out;
         }
 
-        // Ensure input is pumped; avoid recursion
         for (;;)
         {
             if (!PQisBusy(conn_)) break;
@@ -709,17 +700,15 @@ namespace usub::pg
             if (rc == 0)
             {
                 co_await wait_readable();
-                // loop and try again
                 continue;
             }
 
-            // rc < 0: COPY finished or error
             if (PGresult* res = PQgetResult(conn_))
             {
                 if (PQresultStatus(res) == PGRES_COMMAND_OK)
                 {
                     PQclear(res);
-                    out.ok = true; // EOF marker: return ok with empty chunk
+                    out.ok = true;
                     out.value.clear();
                     co_return out;
                 }
@@ -734,7 +723,6 @@ namespace usub::pg
                 co_return out;
             }
 
-            // No result: protocol issue
             out.ok = false;
             out.err.code = PgErrorCode::ProtocolCorrupt;
             out.err.message = "COPY OUT finished but no result";
@@ -811,6 +799,7 @@ namespace usub::pg
         final.ok = false;
         final.code = PgErrorCode::Unknown;
         final.rows_valid = true;
+        final.rows_affected = 0; // [aff]
 
         if (!connected())
         {

@@ -155,6 +155,8 @@ namespace usub::pg
 
         bool rows_valid{true};
 
+        uint64_t rows_affected{0};
+
         [[nodiscard]] inline bool empty() const noexcept { return this->ok && this->rows_valid && this->rows.empty(); }
 
         [[nodiscard]] inline bool has_rows() const noexcept

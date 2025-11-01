@@ -83,7 +83,7 @@ task::Awaitable<void> test_db_query(usub::pg::PgPool& pool)
 
             if (!r_upd.rows.empty() && !r_upd.rows[0].cols.empty())
             {
-                std::cout << "[INFO] UPDATE ok, new name=" << r_upd.rows[0].cols[0] << std::endl;
+                std::cout << "[INFO] UPDATE ok, new name=" << r_upd.rows[0].cols[0] << ", affected rows: " << r_upd.rows_affected <<  std::endl;
             }
             else
             {
