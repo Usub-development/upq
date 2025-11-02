@@ -64,7 +64,7 @@ task::Awaitable<void> test_db_query()
 
     if (res.ok)
         for (auto& r : res.rows)
-            spdlog::info("user: id={}, name={}", r.cols[0], r.cols[1]);
+            ulog::info("user: id={}, name={}", r.cols[0], r.cols[1]);
 
     co_return;
 }
