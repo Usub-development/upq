@@ -13,6 +13,9 @@
 #include "PgTypes.h"
 #include "uvent/utils/datastructures/queue/ConcurrentQueues.h"
 
+// Note: No API changes. Only uses existing connection methods,
+// including reflect-aware helpers from PgConnection.
+
 namespace usub::pg
 {
     class PgPool
@@ -27,15 +30,18 @@ namespace usub::pg
 
         ~PgPool();
 
+        // Acquire a connected pooled connection (coroutine-suspending).
         usub::uvent::task::Awaitable<std::shared_ptr<PgConnectionLibpq>>
         acquire_connection();
 
+        // Fast-path release: retires if dirty.
         void release_connection(std::shared_ptr<PgConnectionLibpq> conn);
 
+        // Async release: drains pending results before recycling.
         usub::uvent::task::Awaitable<void>
         release_connection_async(std::shared_ptr<PgConnectionLibpq> conn);
 
-        // ---------- существующее API ----------
+        // ---------- existing API ----------
         template <typename... Args>
         usub::uvent::task::Awaitable<QueryResult>
         query_on(std::shared_ptr<PgConnectionLibpq> const& conn,
@@ -80,6 +86,7 @@ namespace usub::pg
         inline std::string db() { return this->db_; }
         inline std::string password() { return this->password_; }
 
+        // Mark a connection as dead (do not recycle).
         void mark_dead(std::shared_ptr<PgConnectionLibpq> const& conn);
 
         struct HealthStats
@@ -98,6 +105,7 @@ namespace usub::pg
         std::string db_;
         std::string password_;
 
+        // Lock-free idle queue of connections.
         usub::queue::concurrent::MPMCQueue<std::shared_ptr<PgConnectionLibpq>> idle_;
 
         size_t max_pool_;
@@ -105,6 +113,8 @@ namespace usub::pg
 
         HealthStats stats_;
     };
+
+    // -------------------- impl --------------------
 
     template <typename... Args>
     usub::uvent::task::Awaitable<QueryResult>
@@ -161,6 +171,7 @@ namespace usub::pg
         if (!conn || !conn->connected())
             co_return std::vector<T>{};
 
+        // Uses connection's reflect-aware overload (positional or name-based per PgConnection)
         auto rows = co_await conn->exec_simple_query_nonblocking<T>(sql);
         co_return rows;
     }

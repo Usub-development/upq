@@ -32,16 +32,19 @@ namespace usub::pg
 
         for (;;)
         {
+            // Try to reuse an idle connection first.
             if (this->idle_.try_dequeue(conn))
             {
                 if (!conn->connected())
                 {
+                    // Retire broken connection from pool counters.
                     this->live_count_.fetch_sub(1, std::memory_order_relaxed);
                     continue;
                 }
                 co_return conn;
             }
 
+            // Create a new connection if we are under the limit.
             size_t cur_live = this->live_count_.load(std::memory_order_relaxed);
             if (cur_live < this->max_pool_)
             {
@@ -64,6 +67,7 @@ namespace usub::pg
                     auto err = co_await newConn->connect_async(conninfo);
                     if (err.has_value())
                     {
+                        // Failed to establish; roll back live counter.
                         this->live_count_.fetch_sub(1, std::memory_order_relaxed);
                     }
                     else
@@ -73,6 +77,7 @@ namespace usub::pg
                 }
             }
 
+            // Back off briefly before retrying.
             co_await usub::uvent::system::this_coroutine::sleep_for(100us);
         }
     }
@@ -82,18 +87,21 @@ namespace usub::pg
         if (!conn)
             return;
 
+        // Retire broken connections.
         if (!conn->connected())
         {
             this->live_count_.fetch_sub(1, std::memory_order_relaxed);
             return;
         }
 
+        // If the connection is not clean, retire it.
         if (!conn->is_idle())
         {
             this->live_count_.fetch_sub(1, std::memory_order_relaxed);
             return;
         }
 
+        // Recycle if queue has space; else retire.
         if (!this->idle_.try_enqueue(conn))
         {
             this->live_count_.fetch_sub(1, std::memory_order_relaxed);
@@ -109,6 +117,7 @@ namespace usub::pg
             co_return;
         }
 
+        // Drain pending results (safe path), then recycle.
         bool pumped = co_await conn->pump_input();
         if (pumped)
         {
@@ -128,6 +137,7 @@ namespace usub::pg
         if (!conn)
             return;
 
+        // Simply decrement live counter; connection object will be freed elsewhere.
         this->live_count_.fetch_sub(1, std::memory_order_relaxed);
     }
 }

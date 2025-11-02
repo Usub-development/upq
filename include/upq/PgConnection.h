@@ -10,21 +10,34 @@
 #include <type_traits>
 #include <typeinfo>
 #include <sstream>
-#include <bit>        // std::endian, std::bit_cast
-#include <utility>    // std::byteswap
+#include <bit>
+#include <utility>
 #include <cstdint>
 #include <cstring>
 #include <limits>
 #include <cctype>
+#include <iterator>
+#include <chrono>
+
+#include <libpq-fe.h>
 
 #include "uvent/Uvent.h"
 #include "PgTypes.h"
 #include "meta/PgConcepts.h"
-#include "PgReflect.h" // is_tuple_like_v, ReflectAggregate, мапперы чтения
+#include "PgReflect.h"
+
+#ifndef UPQ_REFLECT_DEBUG
+#define UPQ_REFLECT_DEBUG 1
+#endif
+#if UPQ_REFLECT_DEBUG
+#include <cstdio>
+#define UPQ_CONN_DBG(fmt, ...) do { std::fprintf(stderr, "[UPQ/conn] " fmt "\n", ##__VA_ARGS__); } while(0)
+#else
+#define UPQ_CONN_DBG(fmt, ...) do {} while(0)
+#endif
 
 namespace usub::pg
 {
-    // ---------- server-error mappers ----------
     inline void fill_server_error_fields(PGresult* res, QueryResult& out)
     {
         if (!res) return;
@@ -43,8 +56,6 @@ namespace usub::pg
 
         if (primary && *primary) out.err_detail.message = primary;
         else if (!out.error.empty()) out.err_detail.message = out.error;
-
-        out.err_detail.category = classify_sqlstate(out.err_detail.sqlstate);
 
         out.ok = false;
         out.code = PgErrorCode::ServerError;
@@ -68,7 +79,6 @@ namespace usub::pg
         return 0;
     }
 
-    // ---------- endian helpers ----------
     constexpr uint16_t to_be16(uint16_t v) noexcept
     {
         if constexpr (std::endian::native == std::endian::little) return std::byteswap(v);
@@ -99,7 +109,6 @@ namespace usub::pg
         return to_be64(std::bit_cast<uint64_t>(v));
     }
 
-    // ---------- param encoder buffers ----------
     struct ParamSlices
     {
         const char** values;
@@ -126,7 +135,7 @@ namespace usub::pg
             values[i] = temp_strings.back().c_str();
             lengths[i] = static_cast<int>(sv.size());
             formats[i] = 0;
-            types[i] = 0; // TEXT inferred
+            types[i] = 0;
         }
 
         void set_text_typed(std::string_view sv, Oid oid)
@@ -135,8 +144,8 @@ namespace usub::pg
             temp_strings.emplace_back(sv);
             values[i] = temp_strings.back().c_str();
             lengths[i] = static_cast<int>(sv.size());
-            formats[i] = 0; // text
-            types[i] = oid; // explicit
+            formats[i] = 0;
+            types[i] = oid;
         }
 
         template <class BinT>
@@ -149,7 +158,7 @@ namespace usub::pg
             std::memcpy(buf.data(), data, n);
             values[i] = buf.data();
             lengths[i] = static_cast<int>(n);
-            formats[i] = 1; // binary
+            formats[i] = 1;
             types[i] = oid;
         }
 
@@ -192,10 +201,8 @@ namespace usub::pg
         }
     };
 
-    // ---------- encoding dispatch ----------
     namespace detail
     {
-        // --- scalars ---
         inline void encode_one(ParamSlices& ps, bool v) { ps.set_bin_bool(v); }
 
         template <Integral T>
@@ -230,7 +237,6 @@ namespace usub::pg
             else encode_one(ps, *ov);
         }
 
-        // ----- контейнеры → PG array (один параметр) -----
         template <ArrayLike C>
         inline void encode_one(ParamSlices& ps, const C& cont)
         {
@@ -241,7 +247,6 @@ namespace usub::pg
             ps.set_text_typed(s, arr_oid);
         }
 
-        // C-массив const T[N]
         template <class T, size_t N>
         inline void encode_one(ParamSlices& ps, const T (&arr)[N])
         {
@@ -266,7 +271,6 @@ namespace usub::pg
             ps.set_text_typed(s, arr_oid);
         }
 
-        // ---- tuple-like → разворачиваем элементы в несколько SQL-параметров
         template <class Tup>
             requires (::usub::pg::detail::is_tuple_like_v<std::decay_t<Tup>> &&
                 !ArrayLike<std::decay_t<Tup>> &&
@@ -280,7 +284,6 @@ namespace usub::pg
             }(std::make_index_sequence<std::tuple_size_v<DT>>{});
         }
 
-        // ---- рефлексируемый агрегат → разворачиваем поля в несколько SQL-параметров
         template <class T>
             requires (::usub::pg::detail::ReflectAggregate<std::decay_t<T>> &&
                 !::usub::pg::detail::is_tuple_like_v<std::decay_t<T>> &&
@@ -297,7 +300,6 @@ namespace usub::pg
             }(std::make_index_sequence<ureflect::count_members<V>>{});
         }
 
-        // --- fallback ---
         template <class T>
             requires (!Integral<T> && !Floating<T> && !StringLike<T> && !CharPtr<T> &&
                 !Optional<T> && !ArrayLike<T> && !CArrayLike<T> &&
@@ -305,18 +307,11 @@ namespace usub::pg
                 !InitList<T>)
         inline void encode_one(ParamSlices& ps, T&& v)
         {
-            if constexpr (std::is_convertible_v<T, std::string_view>)
-            {
-                ps.set_text(std::string_view(v));
-            }
-            else if constexpr (std::is_constructible_v<std::string, T>)
-            {
-                ps.set_text(std::string(std::forward<T>(v)));
-            }
+            if constexpr (std::is_convertible_v<T, std::string_view>) ps.set_text(std::string_view(v));
+            else if constexpr (std::is_constructible_v<std::string, T>) ps.set_text(std::string(std::forward<T>(v)));
             else if constexpr (std::is_pointer_v<std::decay_t<T>>)
             {
-                static_assert(!std::is_pointer_v<std::decay_t<T>>,
-                              "Unsupported pointer parameter (only char* allowed)");
+                static_assert(!std::is_pointer_v<std::decay_t<T>>, "Unsupported pointer parameter");
             }
             else if constexpr (Streamable<T>)
             {
@@ -332,22 +327,19 @@ namespace usub::pg
             }
         }
 
-        // ---- param arity ----
         template <class T>
         struct param_arity_impl
         {
             static constexpr size_t value = 1;
         };
 
-        template <class Opt>
-            requires Optional<Opt>
+        template <class Opt> requires Optional<Opt>
         struct param_arity_impl<Opt>
         {
             static constexpr size_t value = 1;
         };
 
-        template <class C>
-            requires ArrayLike<C>
+        template <class C> requires ArrayLike<C>
         struct param_arity_impl<C>
         {
             static constexpr size_t value = 1;
@@ -366,19 +358,15 @@ namespace usub::pg
         };
 
         template <class Tup>
-            requires (::usub::pg::detail::is_tuple_like_v<Tup> &&
-                !ArrayLike<Tup> &&
-                !CArrayLike<Tup>)
+            requires (::usub::pg::detail::is_tuple_like_v<Tup> && !ArrayLike<Tup> && !CArrayLike<Tup>)
         struct param_arity_impl<Tup>
         {
             static constexpr size_t value = std::tuple_size_v<std::decay_t<Tup>>;
         };
 
         template <class T>
-            requires (::usub::pg::detail::ReflectAggregate<T> &&
-                !::usub::pg::detail::is_tuple_like_v<T> &&
-                !ArrayLike<T> &&
-                !CArrayLike<T>)
+            requires (::usub::pg::detail::ReflectAggregate<T> && !::usub::pg::detail::is_tuple_like_v<T> && !ArrayLike<
+                T> && !CArrayLike<T>)
         struct param_arity_impl<T>
         {
             static constexpr size_t value = ureflect::count_members<std::decay_t<T>>;
@@ -390,13 +378,9 @@ namespace usub::pg
         };
 
         template <class... Args>
-        constexpr size_t count_total_params()
-        {
-            return (param_arity<Args>::value + ... + 0);
-        }
+        constexpr size_t count_total_params() { return (param_arity<Args>::value + ... + 0); }
     } // namespace detail
 
-    // ---------- class ----------
     class PgConnectionLibpq
     {
     public:
@@ -422,7 +406,6 @@ namespace usub::pg
         usub::uvent::task::Awaitable<QueryResult>
         exec_param_query_nonblocking(const std::string& sql, Args&&... args);
 
-        // reflect-aware SELECT → std::vector<T>
         template <class T>
         usub::uvent::task::Awaitable<std::vector<T>>
         exec_simple_query_nonblocking(const std::string& sql)
@@ -432,10 +415,19 @@ namespace usub::pg
             Fn base = &PgConnectionLibpq::exec_simple_query_nonblocking;
 
             usub::pg::QueryResult qr = co_await (this->*base)(sql);
-            co_return usub::pg::map_all_reflect_positional<T>(qr);
+            try
+            {
+                auto vec = usub::pg::map_all_reflect_named<T>(qr);
+                co_return vec;
+            }
+            catch (const std::exception& e)
+            {
+                UPQ_CONN_DBG("named-map FAIL: %s — fallback to positional", e.what());
+                auto vec = usub::pg::map_all_reflect_positional<T>(qr);
+                co_return vec;
+            }
         }
 
-        // reflect-aware SELECT one → std::optional<T>
         template <class T>
         usub::uvent::task::Awaitable<std::optional<T>>
         exec_simple_query_one_nonblocking(const std::string& sql)
@@ -446,7 +438,17 @@ namespace usub::pg
 
             usub::pg::QueryResult qr = co_await (this->*base)(sql);
             if (qr.rows.empty()) co_return std::nullopt;
-            co_return usub::pg::map_single_reflect_positional<T>(qr, 0);
+            try
+            {
+                auto v = usub::pg::map_single_reflect_named<T>(qr, 0);
+                co_return v;
+            }
+            catch (const std::exception& e)
+            {
+                UPQ_CONN_DBG("named-one FAIL: %s — fallback to positional", e.what());
+                auto v = usub::pg::map_single_reflect_positional<T>(qr, 0);
+                co_return v;
+            }
         }
 
         usub::uvent::task::Awaitable<PgCopyResult> copy_in_start(const std::string& sql);
@@ -503,7 +505,6 @@ namespace usub::pg
             co_return out;
         }
 
-        // учитываем tuple/aggregate, массивы и т.п.
         constexpr size_t M = detail::count_total_params<Args...>();
 
         std::vector<const char*> values(M ? M : 1, nullptr);
@@ -522,7 +523,6 @@ namespace usub::pg
             temp_strings, temp_bytes
         };
 
-        // каждый аргумент может добавить 1..N params
         (detail::encode_one(ps, std::forward<Args>(args)), ...);
 
         const int nParams = static_cast<int>(idx);
@@ -568,6 +568,17 @@ namespace usub::pg
                 {
                     const int nrows = PQntuples(res);
                     const int ncols = PQnfields(res);
+
+                    if (out.columns.empty())
+                    {
+                        out.columns.reserve(ncols);
+                        for (int c = 0; c < ncols; ++c)
+                        {
+                            const char* nm = PQfname(res, c);
+                            out.columns.emplace_back(nm ? nm : "");
+                        }
+                    }
+
                     if (nrows > 0) out.rows.reserve(out.rows.size() + nrows);
 
                     for (int r = 0; r < nrows; ++r)

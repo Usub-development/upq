@@ -134,6 +134,8 @@ namespace usub::pg
             [[nodiscard]] inline bool empty() const noexcept { return this->cols.empty(); }
         };
 
+        std::vector<std::string> columns;
+
         std::vector<Row> rows;
 
         const Row& operator[](size_t i) const noexcept

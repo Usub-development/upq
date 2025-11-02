@@ -20,7 +20,7 @@ struct NewUser
 struct UserRow
 {
     int64_t id;
-    std::string name;
+    std::string username;
     std::optional<std::string> password;
     std::vector<int> roles;
     std::vector<std::string> tags;
@@ -151,8 +151,10 @@ task::Awaitable<void> test_db_query(usub::pg::PgPool& pool)
 
 task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
 {
+    try
     {
-        auto r = co_await pool.query_awaitable(R"SQL(
+        {
+            auto r = co_await pool.query_awaitable(R"SQL(
             CREATE TABLE IF NOT EXISTS public.users_reflect (
                 id       BIGSERIAL PRIMARY KEY,
                 name     TEXT NOT NULL,
@@ -161,99 +163,104 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
                 tags     TEXT[] NOT NULL
             );
         )SQL");
-        if (!r.ok)
-        {
-            std::cout << "[ERROR] schema: " << r.error << "\n";
-            co_return;
-        }
-    }
-
-    {
-        NewUser u{};
-        u.name = "Alice";
-        u.password = std::nullopt;
-        u.roles = {1, 2, 5};
-        u.tags = {"admin", "core"};
-
-        auto r = co_await pool.exec_reflect(
-            "INSERT INTO users_reflect(name, password, roles, tags) VALUES($1,$2,$3,$4);",
-            u
-        );
-
-        if (!r.ok)
-        {
-            std::cout << "[ERROR] insert: " << r.error << "\n";
-            co_return;
-        }
-        std::cout << "[OK] inserted rows: " << r.rows_affected << "\n";
-    }
-
-    {
-        std::string name = "Bob";
-        std::optional<std::string> pass = std::make_optional<std::string>("x");
-        std::vector<int> roles = {3, 4};
-        std::vector<std::string> tags = {"beta", "labs"};
-
-        auto r2 = co_await pool.exec_reflect(
-            "INSERT INTO users_reflect(name, password, roles, tags) VALUES($1,$2,$3,$4);",
-            std::tuple{name, pass, roles, tags}
-        );
-
-        if (!r2.ok)
-        {
-            std::cout << "[ERROR] insert tuple: " << r2.error << "\n";
-            co_return;
-        }
-        std::cout << "[OK] inserted rows (tuple): " << r2.rows_affected << "\n";
-    }
-
-    {
-        auto rows = co_await pool.query_reflect<UserRow>(
-            "SELECT id, name, password, roles, tags FROM users_reflect ORDER BY id;"
-        );
-
-        if (rows.empty())
-        {
-            std::cout << "[INFO] no rows\n";
-        }
-        else
-        {
-            std::cout << "[INFO] read " << rows.size() << " rows\n";
-            for (auto& r : rows)
+            if (!r.ok)
             {
-                std::cout << "  id=" << r.id
-                    << " name=" << r.name
-                    << " password=" << (r.password ? *r.password : "<NULL>")
-                    << " roles=[";
-                for (size_t i = 0; i < r.roles.size(); ++i)
+                std::cout << "[ERROR] schema: " << r.error << "\n";
+                co_return;
+            }
+        }
+
+        {
+            NewUser u{};
+            u.name = "Alice";
+            u.password = std::nullopt;
+            u.roles = {1, 2, 5};
+            u.tags = {"admin", "core"};
+
+            auto r = co_await pool.exec_reflect(
+                "INSERT INTO users_reflect(name, password, roles, tags) VALUES($1,$2,$3,$4);",
+                u
+            );
+
+            if (!r.ok)
+            {
+                std::cout << "[ERROR] insert: " << r.error << "\n";
+                co_return;
+            }
+            std::cout << "[OK] inserted rows: " << r.rows_affected << "\n";
+        }
+
+        {
+            std::string name = "Bob";
+            std::optional<std::string> pass = std::make_optional<std::string>("x");
+            std::vector<int> roles = {3, 4};
+            std::vector<std::string> tags = {"beta", "labs"};
+
+            auto r2 = co_await pool.exec_reflect(
+                "INSERT INTO users_reflect(name, password, roles, tags) VALUES($1,$2,$3,$4);",
+                std::tuple{name, pass, roles, tags}
+            );
+
+            if (!r2.ok)
+            {
+                std::cout << "[ERROR] insert tuple: " << r2.error << "\n";
+                co_return;
+            }
+            std::cout << "[OK] inserted rows (tuple): " << r2.rows_affected << "\n";
+        }
+
+        {
+            auto rows = co_await pool.query_reflect<UserRow>(
+                "SELECT id, password, name AS username, roles, tags FROM users_reflect ORDER BY id;"
+            );
+
+            if (rows.empty())
+            {
+                std::cout << "[INFO] no rows\n";
+            }
+            else
+            {
+                std::cout << "[INFO] read " << rows.size() << " rows\n";
+                for (auto& r : rows)
                 {
-                    if (i) std::cout << ",";
-                    std::cout << r.roles[i];
+                    std::cout << "  id=" << r.id
+                        << " name=" << r.username
+                        << " password=" << (r.password ? *r.password : "<NULL>")
+                        << " roles=[";
+                    for (size_t i = 0; i < r.roles.size(); ++i)
+                    {
+                        if (i) std::cout << ",";
+                        std::cout << r.roles[i];
+                    }
+                    std::cout << "] tags=[";
+                    for (size_t i = 0; i < r.tags.size(); ++i)
+                    {
+                        if (i) std::cout << ",";
+                        std::cout << r.tags[i];
+                    }
+                    std::cout << "]\n";
                 }
-                std::cout << "] tags=[";
-                for (size_t i = 0; i < r.tags.size(); ++i)
-                {
-                    if (i) std::cout << ",";
-                    std::cout << r.tags[i];
-                }
-                std::cout << "]\n";
+            }
+        }
+
+        {
+            auto one = co_await pool.query_reflect_one<UserRow>(
+                "SELECT id, name, password, roles, tags FROM users_reflect WHERE name='Alice' LIMIT 1;"
+            );
+
+            if (one)
+            {
+                std::cout << "[ONE] id=" << one->id << " name=" << one->username << "\n";
+            }
+            else
+            {
+                std::cout << "[ONE] not found\n";
             }
         }
     }
-
+    catch (std::exception& e)
     {
-        auto one = co_await pool.query_reflect_one<UserRow>(
-            "SELECT id, name, password, roles, tags FROM users_reflect WHERE name='Alice' LIMIT 1;"
-        );
-
-        if (one)
-        {
-            std::cout << "[ONE] id=" << one->id << " name=" << one->name << "\n";
-        }
-        else
-        {
-            std::cout << "[ONE] not found\n";
-        }
+        std::cout << "[EXCEPTION] exception: " << e.what() << "\n";
     }
 
     co_return;
@@ -332,7 +339,7 @@ usub::uvent::task::Awaitable<void> tx_reflect_example(usub::pg::PgPool& pool)
         for (auto& u : rows)
         {
             std::cout << "  id=" << u.id
-                << " name=" << u.name
+                << " name=" << u.username
                 << " pwd=" << (u.password ? *u.password : "<NULL>")
                 << " roles=[";
             for (size_t i = 0; i < u.roles.size(); ++i)
