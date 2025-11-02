@@ -16,6 +16,7 @@ Primary high-level entrypoint for queries in **upq**.
 - Safe recycling with dirty-connection handling
 - Structured errors (`QueryResult`)
 - Optional periodic health checks (`PgPoolHealthConfig`)
+- Reflect-aware SELECT/EXEC helpers (`query_reflect`, `exec_reflect`)
 - Compatible with high-volume ops exposed on `PgConnectionLibpq`:
     - `COPY ... FROM STDIN` / `COPY ... TO STDOUT`
     - server-side cursors with chunked fetch
@@ -137,7 +138,73 @@ Both APIs return `QueryResult` with `ok`, `code`, `error`, `rows`, `rows_valid`.
 
 ---
 
-### Pipelined query execution
+## Reflect-aware API
+
+Reflection-based helpers provide direct mapping between SQL and C++ aggregates.
+
+### SELECT → `std::vector<T>` or `std::optional<T>`
+
+```cpp
+struct UserRow {
+    int64_t id;
+    std::string name;
+    std::optional<std::string> password;
+    std::vector<int> roles;
+    std::vector<std::string> tags;
+};
+
+// Multiple rows
+auto users = co_await pool.query_reflect<UserRow>(
+    "SELECT id, name, password, roles, tags FROM users ORDER BY id;"
+);
+
+// Single row
+auto one = co_await pool.query_reflect_one<UserRow>(
+    "SELECT id, name, password, roles, tags FROM users WHERE id = 1;"
+);
+```
+
+### INSERT/UPDATE from aggregates
+
+```cpp
+struct NewUser {
+    std::string name;
+    std::optional<std::string> password;
+    std::vector<int> roles;
+    std::vector<std::string> tags;
+};
+
+NewUser nu{ "bob", std::nullopt, {1, 2}, {"vip"} };
+
+auto res = co_await pool.exec_reflect(
+    "INSERT INTO users(name, password, roles, tags) VALUES ($1,$2,$3,$4);",
+    nu
+);
+```
+
+### API summary
+
+| Method                               | Description                                                  |
+|--------------------------------------|--------------------------------------------------------------|
+| `query_reflect<T>(sql)`              | SELECT → `std::vector<T>`                                    |
+| `query_reflect_one<T>(sql)`          | SELECT one → `std::optional<T>`                              |
+| `exec_reflect(sql, obj)`             | Executes using fields of an aggregate or tuple as parameters |
+| `query_on_reflect<T>(conn, sql)`     | Same as above, bound to existing connection                  |
+| `query_on_reflect_one<T>(conn, sql)` | Single-row variant                                           |
+| `exec_reflect_on(conn, sql, obj)`    | Aggregate parameter execution on given connection            |
+
+### Mapping rules
+
+* Field order in `SELECT` must match member order in the struct.
+* `std::optional<T>` → NULL or value.
+* Containers (`vector`, `array`, etc.) → PostgreSQL arrays.
+* Aggregate or tuple expands into multiple `$1..$N` parameters.
+* Non-aggregate containers are sent as a single typed array parameter.
+* Pointers (except `char*`) are unsupported.
+
+---
+
+## Pipelined query execution
 
 All `query*()` methods support **PostgreSQL pipelining** via a compile-time template flag.
 
@@ -253,15 +320,6 @@ task::Awaitable<void> cursor_stream_example()
 
 `PgCursorChunk` is described in `results.md`.
 
-This approach:
-
-* Opens a cursor (`DECLARE ... CURSOR FOR <query>`)
-* Fetches N rows at a time using `FETCH FORWARD <N> FROM <cursor>`
-* Closes cursor and commits
-
-The pool’s recycling logic ensures that after this multi-step usage, the connection is either safely recycled (if
-drained) or retired and replaced.
-
 ---
 
 ## Error model
@@ -288,5 +346,8 @@ Pool self-heals by retiring broken connections and opening new ones on demand.
 | Dirty handling       | Drain on async release, otherwise retire                        |
 | Health checks        | Optional periodic probes with `checked/alive/reconnected` stats |
 | COPY & cursors       | Via `PgConnectionLibpq`, safe to return to pool                 |
+| Reflect API          | `query_reflect` / `exec_reflect` for aggregates & structs       |
 | Structured errors    | Clear non-exceptional failure reporting                         |
 | Pipeline execution   | Compile-time toggle `<true>` for batched async queries          |
+
+```

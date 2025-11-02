@@ -15,14 +15,6 @@
 
 namespace usub::pg
 {
-    struct PgPoolHealthConfig
-    {
-        bool enabled{false};
-        uint64_t interval_ms{600000};
-    };
-
-    class PgHealthChecker;
-
     class PgPool
     {
     public:
@@ -31,8 +23,7 @@ namespace usub::pg
                std::string user,
                std::string db,
                std::string password,
-               size_t max_pool_size = 32,
-               PgPoolHealthConfig health_cfg = {});
+               size_t max_pool_size = 32);
 
         ~PgPool();
 
@@ -55,8 +46,6 @@ namespace usub::pg
         usub::uvent::task::Awaitable<QueryResult>
         query_awaitable(const std::string& sql, Args&&... args);
 
-        // ---------- [reflect] ЧТЕНИЕ: SELECT → vector<T>/optional<T> ----------
-        // map по позициям: SELECT cols...;  -> fields в порядке объявления у T или tuple
         template <class T>
         usub::uvent::task::Awaitable<std::vector<T>>
         query_on_reflect(std::shared_ptr<PgConnectionLibpq> const& conn,
@@ -91,10 +80,6 @@ namespace usub::pg
         inline std::string db() { return this->db_; }
         inline std::string password() { return this->password_; }
 
-        inline PgPoolHealthConfig health_cfg() const { return this->health_cfg_; }
-
-        PgHealthChecker& health_checker();
-
         void mark_dead(std::shared_ptr<PgConnectionLibpq> const& conn);
 
         struct HealthStats
@@ -118,11 +103,7 @@ namespace usub::pg
         size_t max_pool_;
         std::atomic<size_t> live_count_;
 
-        PgPoolHealthConfig health_cfg_;
-
         HealthStats stats_;
-
-        std::unique_ptr<PgHealthChecker> health_checker_;
     };
 
     template <typename... Args>

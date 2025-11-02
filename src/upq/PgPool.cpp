@@ -1,5 +1,4 @@
 #include "upq/PgPool.h"
-#include "upq/PgHealthChecker.h"
 #include <cstdlib>
 
 namespace usub::pg
@@ -9,8 +8,7 @@ namespace usub::pg
                    std::string user,
                    std::string db,
                    std::string password,
-                   size_t max_pool_size,
-                   PgPoolHealthConfig health_cfg)
+                   size_t max_pool_size)
         : host_(std::move(host))
           , port_(std::move(port))
           , user_(std::move(user))
@@ -19,23 +17,11 @@ namespace usub::pg
           , idle_(max_pool_size)
           , max_pool_(max_pool_size)
           , live_count_(0)
-          , health_cfg_(health_cfg)
           , stats_{}
     {
-        this->health_checker_ = std::make_unique<PgHealthChecker>(*this, health_cfg);
-
-        if (health_cfg.enabled)
-        {
-            usub::uvent::system::co_spawn(this->health_checker_->run());
-        }
     }
 
     PgPool::~PgPool() = default;
-
-    PgHealthChecker& PgPool::health_checker()
-    {
-        return *this->health_checker_;
-    }
 
     usub::uvent::task::Awaitable<std::shared_ptr<PgConnectionLibpq>>
     PgPool::acquire_connection()

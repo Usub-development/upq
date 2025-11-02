@@ -45,11 +45,7 @@ file(GLOB_RECURSE UPQ_SOURCES CONFIGURE_DEPENDS
         ${CMAKE_CURRENT_SOURCE_DIR}/src/upq/*.cpp
 )
 
-add_library(upq ${UPQ_SOURCES} ${UPQ_HEADERS}
-        include/upq/PgNotificationMultiplexer.h
-        include/upq/PgHealthChecker.h
-        src/upq/PgHealthChecker.cpp
-        include/upq/PgReflect.h)
+add_library(upq ${UPQ_SOURCES} ${UPQ_HEADERS})
 add_library(usub::upq ALIAS upq)
 
 target_include_directories(upq

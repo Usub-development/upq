@@ -13,6 +13,44 @@ Each type includes consistent fields: `ok`, `code`, `error`, and `err_detail`.
 
 ---
 
+## Reflect integration
+
+When using the reflect-based API (`query_reflect`, `query_reflect_one`, `exec_reflect`,  
+`select_reflect`, `select_one_reflect`), you usually **don’t access `QueryResult` directly**.
+
+Instead, data is automatically mapped:
+
+| Operation                 | Return type        | Description                                                  |
+|---------------------------|--------------------|--------------------------------------------------------------|
+| `query_reflect<T>()`      | `std::vector<T>`   | Maps rows positionally to struct/tuple fields                |
+| `query_reflect_one<T>()`  | `std::optional<T>` | Returns one row or `std::nullopt`                            |
+| `exec_reflect()`          | `QueryResult`      | Executes `INSERT/UPDATE` using aggregate or tuple parameters |
+| `select_reflect<T>()`     | `std::vector<T>`   | Transactional SELECT → struct list                           |
+| `select_one_reflect<T>()` | `std::optional<T>` | Transactional SELECT single row                              |
+
+### Example
+
+```cpp
+struct User {
+    int64_t id;
+    std::string name;
+    std::optional<std::string> password;
+};
+
+auto users = co_await pool.query_reflect<User>(
+    "SELECT id, name, password FROM users;"
+);
+
+for (auto& u : users)
+    std::cout << "id=" << u.id << " name=" << u.name << "\n";
+```
+
+Under the hood, the library still produces an internal `QueryResult`
+and uses it to construct your mapped objects. For debugging or mixed workflows,
+you can still call `query_awaitable()` to access raw result rows.
+
+---
+
 ## PgErrorCode
 
 Every result type references `PgErrorCode` for classification:
@@ -32,7 +70,7 @@ enum class PgErrorCode : uint32_t {
     AwaitCanceled,
     Unknown
 };
-````
+```
 
 **Meaning:**
 
@@ -265,3 +303,5 @@ struct PgCursorChunk
 * Use `has_rows()` for success with results.
 * `rows_valid == false` → truncated/unsafe result.
 * No exceptions; all information is explicit and type-safe.
+
+```

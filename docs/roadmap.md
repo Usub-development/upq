@@ -83,7 +83,7 @@ CREATE TABLE cron_jobs
     last_run    timestamptz,
     query       text
 );
-```
+````
 
 Each job is periodically executed by a background coroutine.
 
@@ -120,7 +120,7 @@ Migration system using SQL files (`migrations/*.sql`) with transactional apply/r
 * Fully coroutine-compatible.
 
 **Goal:** schema management built into runtime.
-**Status:** Planned after TypeRegistry.
+**Status:** Planned after TypeRegistry & ReflectSystem.
 
 ---
 
@@ -157,7 +157,7 @@ Foundation for future ORM-style or codegen tooling.
 
 ---
 
-## 10. PgTestHarness — Transactional Testing Utility
+## 11. PgTestHarness — Transactional Testing Utility
 
 Test helper for SQL regression and snapshot testing.
 
@@ -178,7 +178,7 @@ Test helper for SQL regression and snapshot testing.
 |-------|----------------------------------------------|----------------------------------|
 | **1** | ReconnectSupervisor, StatsRegistry           | Stability & observability        |
 | **2** | PreparedStatementRegistry, ChannelDispatcher | Throughput & reactive events     |
-| **3** | CronScheduler, TypeRegistry                  | Automation & binary performance  |
+| **3** | CronScheduler, TypeRegistry, ReflectSystem   | Automation & binary performance  |
 | **4** | Migrator, TransactionScope                   | Schema control & DX improvements |
 | **5** | Introspector, TestHarness                    | Ecosystem & developer tooling    |
 

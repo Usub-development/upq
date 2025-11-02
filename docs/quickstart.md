@@ -43,7 +43,9 @@ task::Awaitable<void> create_schema()
         "CREATE TABLE IF NOT EXISTS users("
         "id SERIAL PRIMARY KEY,"
         "name TEXT,"
-        "password TEXT);"
+        "password TEXT,"
+        "roles INT[],"
+        "tags TEXT[]);"
     );
 
     if (!res.ok)
@@ -111,9 +113,75 @@ task::Awaitable<void> get_user(int user_id)
 
 ---
 
-## 5. Diagnostics
+## 5. Reflect-based queries (struct mapping)
 
-Every query now returns structured error information:
+Reflection allows automatic binding of aggregates and tuples to query parameters,
+and automatic mapping of query results into structs.
+
+### SELECT → `std::vector<T>` or `std::optional<T>`
+
+```cpp
+struct UserRow
+{
+    int64_t id;
+    std::string name;
+    std::optional<std::string> password;
+    std::vector<int> roles;
+    std::vector<std::string> tags;
+};
+
+task::Awaitable<void> get_all()
+{
+    auto& pool = usub::pg::PgPool::instance();
+
+    auto rows = co_await pool.query_reflect<UserRow>(
+        "SELECT id, name, password, roles, tags FROM users ORDER BY id;"
+    );
+
+    for (auto& r : rows)
+        std::cout << "user=" << r.name << "\n";
+    co_return;
+}
+```
+
+### Aggregate → parameters
+
+```cpp
+struct NewUser
+{
+    std::string name;
+    std::optional<std::string> password;
+    std::vector<int> roles;
+    std::vector<std::string> tags;
+};
+
+task::Awaitable<void> insert_user()
+{
+    NewUser u{ "bob", std::nullopt, {1, 2}, {"vip"} };
+
+    auto res = co_await usub::pg::PgPool::instance().exec_reflect(
+        "INSERT INTO users(name, password, roles, tags) VALUES ($1,$2,$3,$4);",
+        u
+    );
+
+    if (!res.ok)
+        std::cout << "Insert failed: " << res.error << "\n";
+    co_return;
+}
+```
+
+### Rules
+
+* Field order in `SELECT` must match the order of members in the struct.
+* `std::optional<T>` → NULL or value.
+* Containers (`vector`, `array`, etc.) → PostgreSQL arrays.
+* Aggregate/tuple expands into multiple `$1..$N` parameters.
+
+---
+
+## 6. Diagnostics
+
+Every query returns structured error information:
 
 ```cpp
 auto res = co_await pool.query_awaitable("SELECT * FROM nonexistent;");
