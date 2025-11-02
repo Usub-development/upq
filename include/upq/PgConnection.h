@@ -6,10 +6,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
-#include <array>
-#include <list>
 #include <initializer_list>
-#include <chrono>
 #include <type_traits>
 #include <typeinfo>
 #include <sstream>
@@ -18,7 +15,6 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
-#include <iterator>
 #include <cctype>
 
 #include "uvent/Uvent.h"
@@ -479,7 +475,6 @@ namespace usub::pg
         QueryResult drain_all_results();
         PgCopyResult drain_copy_end_result();
         PgCursorChunk drain_single_result_rows();
-        QueryResult drain_single_result_status_only();
 
     private:
         PGconn* conn_{nullptr};

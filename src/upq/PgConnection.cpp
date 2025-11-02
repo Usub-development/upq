@@ -3,7 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <sstream>
+#include <chrono>
 
 namespace usub::pg
 {
@@ -67,145 +67,7 @@ namespace usub::pg
         if (hint && *hint) { out.error.append(" hint: ").append(hint); }
     }
 
-    // ---------- pgresult mappers ----------
-    static QueryResult pgresult_to_QueryResult(PGresult* res)
-    {
-        QueryResult out;
-        out.rows_affected = 0; // [aff-fix]
-
-        if (!res) return out;
-
-        const ExecStatusType st = PQresultStatus(res);
-        if (st == PGRES_TUPLES_OK)
-        {
-            const int nrows = PQntuples(res);
-            const int ncols = PQnfields(res);
-            for (int r = 0; r < nrows; ++r)
-            {
-                QueryResult::Row row;
-                for (int c = 0; c < ncols; ++c)
-                {
-                    if (PQgetisnull(res, r, c)) row.cols.emplace_back();
-                    else
-                    {
-                        const char* v = PQgetvalue(res, r, c);
-                        const int len = PQgetlength(res, r, c);
-                        row.cols.emplace_back(v, static_cast<size_t>(len));
-                    }
-                }
-                out.rows.emplace_back(std::move(row));
-            }
-            out.ok = true;
-            out.code = PgErrorCode::OK;
-            if (out.rows_affected == 0)
-                out.rows_affected = static_cast<uint64_t>(nrows); // [aff-fix]
-        }
-        else if (st == PGRES_COMMAND_OK)
-        {
-            out.ok = true;
-            out.code = PgErrorCode::OK;
-            out.rows_affected = extract_rows_affected(res); // [aff-fix]
-        }
-        else
-        {
-            fill_server_error_fields(res, out);
-        }
-        return out;
-    }
-
-    static PgCopyResult pgresult_to_PgCopyResult(PGresult* res)
-    {
-        PgCopyResult out;
-        out.ok = false;
-        out.code = PgErrorCode::Unknown;
-        out.rows_affected = 0;
-
-        if (!res)
-        {
-            out.ok = true;
-            out.code = PgErrorCode::OK;
-            return out;
-        }
-
-        ExecStatusType st = PQresultStatus(res);
-        if (st == PGRES_COMMAND_OK)
-        {
-            out.ok = true;
-            out.code = PgErrorCode::OK;
-            if (const char* aff = PQcmdTuples(res); aff && *aff)
-            {
-                out.rows_affected = std::strtoull(aff, nullptr, 10);
-            }
-        }
-        else
-        {
-            fill_server_error_fields_copy(res, out);
-        }
-
-        return out;
-    }
-
-    static PgCursorChunk pgresult_to_PgCursorChunk(PGresult* res)
-    {
-        PgCursorChunk out;
-        out.ok = false;
-        out.code = PgErrorCode::Unknown;
-        out.done = false;
-
-        if (!res)
-        {
-            out.ok = true;
-            out.code = PgErrorCode::OK;
-            out.done = true;
-            return out;
-        }
-
-        ExecStatusType st = PQresultStatus(res);
-        if (st == PGRES_TUPLES_OK)
-        {
-            const int nrows = PQntuples(res);
-            const int ncols = PQnfields(res);
-
-            if (nrows > 0) out.rows.reserve(nrows);
-            for (int r = 0; r < nrows; ++r)
-            {
-                QueryResult::Row row;
-                row.cols.reserve(ncols);
-                for (int c = 0; c < ncols; ++c)
-                {
-                    if (PQgetisnull(res, r, c))
-                    {
-                        row.cols.emplace_back();
-                    }
-                    else
-                    {
-                        const char* v = PQgetvalue(res, r, c);
-                        const int len = PQgetlength(res, r, c);
-                        row.cols.emplace_back(v, static_cast<size_t>(len));
-                    }
-                }
-                out.rows.emplace_back(std::move(row));
-            }
-
-            if (nrows == 0) out.done = true;
-
-            out.ok = true;
-            out.code = PgErrorCode::OK;
-        }
-        else if (st == PGRES_COMMAND_OK)
-        {
-            out.ok = true;
-            out.code = PgErrorCode::OK;
-            out.done = true;
-        }
-        else
-        {
-            fill_server_error_fields_cursor(res, out);
-        }
-
-        return out;
-    }
-
+    // ---------- COPY IN ----------
     usub::uvent::task::Awaitable<PgCopyResult>
     PgConnectionLibpq::copy_in_start(const std::string& sql)
     {
@@ -550,7 +412,7 @@ namespace usub::pg
         final.ok = false;
         final.code = PgErrorCode::Unknown;
         final.rows_valid = true;
-        final.rows_affected = 0; // [aff]
+        final.rows_affected = 0;
 
         if (!connected())
         {
@@ -851,53 +713,6 @@ namespace usub::pg
         ok.ok = true;
         ok.code = PgErrorCode::OK;
         ok.done = true;
-        return ok;
-    }
-
-    QueryResult PgConnectionLibpq::drain_single_result_status_only()
-    {
-        if (PGresult* res = PQgetResult(conn_))
-        {
-            QueryResult tmp{};
-            const auto st = PQresultStatus(res);
-            if (st == PGRES_TUPLES_OK)
-            {
-                const int nrows = PQntuples(res);
-                tmp.ok = true;
-                tmp.code = PgErrorCode::OK;
-                tmp.rows_affected = static_cast<uint64_t>(nrows);
-            }
-            else if (st == PGRES_COMMAND_OK)
-            {
-                tmp.ok = true;
-                tmp.code = PgErrorCode::OK;
-                tmp.rows_affected = extract_rows_affected(res);
-            }
-            else
-            {
-                fill_server_error_fields(res, tmp);
-            }
-            PQclear(res);
-
-            if (PGresult* leftover = PQgetResult(conn_))
-            {
-                QueryResult err{};
-                fill_server_error_fields(leftover, err);
-                PQclear(leftover);
-                err.rows_valid = false;
-                return err;
-            }
-
-            tmp.rows.clear();
-            tmp.rows_valid = true;
-            return tmp;
-        }
-
-        QueryResult ok{};
-        ok.ok = true;
-        ok.code = PgErrorCode::OK;
-        ok.rows_valid = true;
-        ok.rows_affected = 0;
         return ok;
     }
 

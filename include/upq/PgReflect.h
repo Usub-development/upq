@@ -16,7 +16,7 @@
 #include <ios>
 #include <istream>
 
-#include "meta/ureflect_auto.h"
+#include "ureflect/ureflect_auto.h"
 #include "PgTypes.h"
 
 namespace usub::pg

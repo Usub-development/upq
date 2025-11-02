@@ -27,7 +27,15 @@ FetchContent_Declare(
         OVERRIDE_FIND_PACKAGE
 )
 
+FetchContent_Declare(
+        ureflect
+        GIT_REPOSITORY https://github.com/Usub-development/ureflect.git
+        GIT_TAG main
+        OVERRIDE_FIND_PACKAGE
+)
+
 FetchContent_MakeAvailable(uvent)
+FetchContent_MakeAvailable(ureflect)
 
 file(GLOB_RECURSE UPQ_HEADERS CONFIGURE_DEPENDS
         ${CMAKE_CURRENT_SOURCE_DIR}/include/upq/*.h
@@ -53,6 +61,7 @@ target_include_directories(upq
 target_link_libraries(upq
         PUBLIC
         usub::uvent
+        usub::ureflect
         OpenSSL::Crypto
         PostgreSQL::PostgreSQL
 )
