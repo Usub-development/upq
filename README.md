@@ -2,22 +2,23 @@
 
 ### Overview
 
-`upq` is a coroutine-based, fully asynchronous PostgreSQL driver built on top of **libpq** and integrated directly into
-the **uvent** event loop.
-It provides a non-blocking query interface, connection pooling, parameterized statements, and RAII-based transactional
-wrappers — all without any external async libraries.
+`upq` is a coroutine-based, fully asynchronous PostgreSQL client built on top of **libpq** and integrated directly into
+the **uvent** event loop.  
+It provides a non-blocking query interface, connection pooling, parameterized statements, RAII-based transactions,  
+and now — full reflection-based mapping with [ureflect](https://github.com/Usub-development/ureflect).
 
 ---
 
 ### ✳️ Features
 
-* Asynchronous connect using `PQconnectStart` + `PQconnectPoll` integrated with `uvent`’s event system
-* Coroutine-awaitable I/O (`co_await pool->query_awaitable(...)`)
+* Asynchronous connect via `PQconnectStart` + `PQconnectPoll` integrated with `uvent`
+* Coroutine-awaitable queries (`co_await pool.query_awaitable(...)`)
 * Global static connection pool (`PgPool::instance()`)
-* Connection reuse with lock-free MPMC queue
+* Lock-free MPMC queue for connection reuse
 * Safe transactional RAII wrapper (`PgTransaction`)
-* Parameter binding with `$1, $2, …` syntax
-* Zero external dependencies beyond **libpq** and **spdlog**
+* Parameter binding with `$1, $2, …`
+* Zero-copy pipeline, no async wrappers
+* **NEW:** Reflection support — map structs ↔ SQL rows automatically
 
 ---
 
@@ -31,15 +32,16 @@ using namespace usub::uvent;
 
 task::Awaitable<void> test_db_query()
 {
-    // Ensure table exists
-    co_await usub::pg::PgPool::instance().query_awaitable(
-        "CREATE TABLE IF NOT EXISTS public.users("
-        "id SERIAL PRIMARY KEY,"
-        "name TEXT,"
-        "password TEXT);"
-    );
+    // Create schema
+    co_await usub::pg::PgPool::instance().query_awaitable(R"SQL(
+        CREATE TABLE IF NOT EXISTS public.users(
+            id SERIAL PRIMARY KEY,
+            name TEXT,
+            password TEXT
+        );
+    )SQL");
 
-    // Transaction block with parameterized query
+    // Transaction example
     {
         usub::pg::PgTransaction txn;
         co_await txn.begin();
@@ -55,7 +57,7 @@ task::Awaitable<void> test_db_query()
         co_await txn.commit();
     }
 
-    // Regular SELECT outside of transaction
+    // Regular SELECT outside transaction
     auto res = co_await usub::pg::PgPool::instance().query_awaitable(
         "SELECT id, name FROM users ORDER BY id LIMIT $1;", 5
     );
@@ -66,23 +68,45 @@ task::Awaitable<void> test_db_query()
 
     co_return;
 }
+````
 
-int main()
-{
-    usub::Uvent uvent(4);
+---
 
-    // Initialize global connection pool
-    usub::pg::PgPool::init_global("localhost", "12432",
-                                  "postgres", "postgres", "password");
+### 🧩 Reflect Integration (v2.0.0)
 
-    // Spawn coroutine test
-    system::co_spawn_static(test_db_query(), 0);
+`upq` integrates directly with `ureflect` — allowing you to pass and receive typed C++ structures without manual
+mapping.
 
-    uvent.run();
-}
+```cpp
+struct User {
+    int64_t id;
+    std::string name;
+    std::optional<std::string> password;
+    std::vector<int> roles;
+    std::vector<std::string> tags;
+};
+
+// Insert from struct
+User u{"Alice", std::nullopt, {1, 2, 5}, {"admin", "core"}};
+co_await pool.exec_reflect(
+    "INSERT INTO users(name, password, roles, tags) VALUES($1,$2,$3,$4);", u
+);
+
+// Fetch directly into vector<User>
+auto rows = co_await pool.query_reflect<User>(
+    "SELECT id, name, password, roles, tags FROM users;"
+);
+
+for (auto& r : rows)
+    spdlog::info("User {}: roles={}, tags={}", r.name, r.roles.size(), r.tags.size());
 ```
 
-### Integration with webserver based on uvent can be found [here](https://github.com/Usub-development/webserver/tree/uvent302/examples/upq_integration).
+**Key notes:**
+
+* Struct fields are matched to columns **by name**.
+* `std::optional<T>` ↔ SQL `NULL`
+* `std::vector<T>` ↔ PostgreSQL array
+* Reflection functions are header-only, zero-overhead
 
 ---
 
@@ -93,33 +117,30 @@ int main()
 | `PgPool`            | Global async connection pool built on `libpq` and `uvent::MPMCQueue`.                 |
 | `PgConnectionLibpq` | Wraps one `PGconn`, handles `PQconnectPoll`, `PQsendQuery`, `PQconsumeInput`.         |
 | `PgTransaction`     | RAII wrapper for BEGIN / COMMIT / ROLLBACK; automatically returns connection to pool. |
+| `PgReflect`         | Reflection-based parameter and result mapper using `ureflect`.                        |
 | `QueryResult`       | Simple struct containing `rows`, `cols`, `ok`, and `error`.                           |
 
 ---
 
 ### 🧠 Design Notes
 
-* All I/O operations are coroutine-friendly (`co_await` on read/write readiness).
+* All I/O operations are coroutine-friendly (`co_await` on readiness).
 * No blocking calls — even `connect()` and `flush()` are async via uvent awaiters.
-* The pool automatically grows and reuses connections.
-* Thread-safe access: multiple threads can concurrently `acquire_connection()` and `release_connection()`.
+* Lock-free MPMC queue ensures high-throughput pooling.
+* Safe across threads; no locks on query path.
+* Reflect-mapping is **compile-time** and **header-only**.
 
 ---
 
-### 🧱 Example Schema (minified)
+### 🧱 Example Schema
 
 ```sql
-CREATE TABLE IF NOT EXISTS public.users
-(
-    id
-    SERIAL
-    PRIMARY
-    KEY,
-    name
-    TEXT,
-    password
-    TEXT
+CREATE TABLE IF NOT EXISTS public.users_reflect (
+      id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL,
+      password TEXT, roles INT4[] NOT NULL,
+      tags TEXT [] NOT NULL
 );
+
 ```
 
 ---
@@ -129,14 +150,26 @@ CREATE TABLE IF NOT EXISTS public.users
 Requires:
 
 * C++23 compiler (clang ≥16 / gcc ≥13)
-* `libpq` (PostgreSQL client library)
-* uvent headers
+* `libpq`
+* `uvent` headers
 
 Example CMake:
 
 ```cmake
-find_package(PostgreSQL REQUIRED)
-target_link_libraries(app PRIVATE PostgreSQL::PostgreSQL spdlog::spdlog)
+include(FetchContent)
+
+FetchContent_Declare(
+        upq
+        GIT_REPOSITORY https://github.com/Usub-development/upq.git
+        GIT_TAG main
+        OVERRIDE_FIND_PACKAGE
+)
+
+FetchContent_MakeAvailable(upq)
+
+target_link_libraries(${PROJECT_NAME} PRIVATE
+        usub::upq
+)
 ```
 
 ---
