@@ -1,59 +1,54 @@
 # Result Types
 
-upq uses structured, allocation-owned result objects for all database operations.  
-No exceptions are thrown — everything is explicit and predictable.
+`upq` returns structured, ownership-safe result objects for every operation.  
+No exceptions — all outcomes are explicit and typed.
 
 There are three main result types:
 
-- **`QueryResult`** — for standard SQL statements (`SELECT`, `UPDATE`, `COMMIT`, etc.)
-- **`PgCopyResult`** — for bulk COPY (`COPY ... FROM STDIN`, `COPY ... TO STDOUT`)
-- **`PgCursorChunk`** — for chunked cursor fetches
+- **`QueryResult`** — standard SQL results (`SELECT`, `UPDATE`, `COMMIT`, etc.)
+- **`PgCopyResult`** — bulk I/O results (`COPY ... FROM/TO`)
+- **`PgCursorChunk`** — streamed fetch chunks for server-side cursors
 
-Each type includes consistent fields: `ok`, `code`, `error`, and `err_detail`.
+Each contains `ok`, `code`, `error`, and `err_detail` fields for consistent diagnostics.
 
 ---
 
-## Reflect integration
+## Reflect Integration
 
-When using the reflect-based API (`query_reflect`, `query_reflect_one`, `exec_reflect`,  
-`select_reflect`, `select_one_reflect`), you usually **don’t access `QueryResult` directly**.
+With reflection-based APIs (`query_reflect`, `query_reflect_one`, `exec_reflect`),  
+you typically **don’t access `QueryResult` directly** — the library maps results into aggregates automatically.
 
-Instead, data is automatically mapped:
+| Operation                | Return type        | Description                                             |
+|--------------------------|--------------------|---------------------------------------------------------|
+| `query_reflect<T>()`     | `std::vector<T>`   | SELECT → struct or tuple list (name- or position-based) |
+| `query_reflect_one<T>()` | `std::optional<T>` | SELECT one row → optional                               |
+| `exec_reflect()`         | `QueryResult`      | Executes using struct/tuple as parameters               |
 
-| Operation                 | Return type        | Description                                                  |
-|---------------------------|--------------------|--------------------------------------------------------------|
-| `query_reflect<T>()`      | `std::vector<T>`   | Maps rows positionally to struct/tuple fields                |
-| `query_reflect_one<T>()`  | `std::optional<T>` | Returns one row or `std::nullopt`                            |
-| `exec_reflect()`          | `QueryResult`      | Executes `INSERT/UPDATE` using aggregate or tuple parameters |
-| `select_reflect<T>()`     | `std::vector<T>`   | Transactional SELECT → struct list                           |
-| `select_one_reflect<T>()` | `std::optional<T>` | Transactional SELECT single row                              |
-
-### Example
+Example:
 
 ```cpp
 struct User {
     int64_t id;
-    std::string name;
+    std::string username; // maps from "name AS username"
     std::optional<std::string> password;
 };
 
 auto users = co_await pool.query_reflect<User>(
-    "SELECT id, name, password FROM users;"
+    "SELECT id, name AS username, password FROM users;"
 );
 
 for (auto& u : users)
-    std::cout << "id=" << u.id << " name=" << u.name << "\n";
+    std::cout << "id=" << u.id << " name=" << u.username << "\n";
 ```
 
-Under the hood, the library still produces an internal `QueryResult`
-and uses it to construct your mapped objects. For debugging or mixed workflows,
-you can still call `query_awaitable()` to access raw result rows.
+Internally, `upq` still constructs a `QueryResult` — reflection just translates between `rows` and your C++ types.
+To debug raw SQL behavior, use `query_awaitable()`.
 
 ---
 
 ## PgErrorCode
 
-Every result type references `PgErrorCode` for classification:
+Every result embeds a `PgErrorCode` for classification:
 
 ```cpp
 enum class PgErrorCode : uint32_t {
@@ -72,17 +67,15 @@ enum class PgErrorCode : uint32_t {
 };
 ```
 
-**Meaning:**
-
 | Code               | Meaning                                           |
 |--------------------|---------------------------------------------------|
 | `OK`               | Operation succeeded                               |
-| `ConnectionClosed` | Socket or connection unusable                     |
-| `SocketReadFailed` | Low-level I/O failure                             |
+| `ConnectionClosed` | Socket/PGconn unusable                            |
+| `SocketReadFailed` | I/O error during read or flush                    |
 | `ServerError`      | PostgreSQL returned an error (non-00000 SQLSTATE) |
-| `InvalidFuture`    | Awaited an invalid or uninitialized query         |
-| `ParserTruncated*` | Row/field metadata truncated or corrupt           |
-| `Unknown`          | Fallback for unspecified errors                   |
+| `InvalidFuture`    | Query awaited after invalidation                  |
+| `ParserTruncated*` | Corrupted or incomplete row/field metadata        |
+| `Unknown`          | Fallback category                                 |
 
 ---
 
@@ -93,9 +86,8 @@ Returned by:
 * `PgPool::query_awaitable(...)`
 * `PgPool::query_on(...)`
 * `PgTransaction::query(...)`
-* `PgConnectionLibpq::exec_simple_query_nonblocking(...)`
-* `PgConnectionLibpq::exec_param_query_nonblocking(...)`
-* transaction statements (`BEGIN`, `COMMIT`, `ROLLBACK`)
+* `PgConnectionLibpq::exec_*_nonblocking(...)`
+* Transaction control commands (`BEGIN`, `COMMIT`, `ROLLBACK`)
 
 ### Structure
 
@@ -115,9 +107,6 @@ struct QueryResult
 
     std::vector<Row> rows;
 
-    const Row& operator[](size_t i) const noexcept { return rows[i]; }
-    Row& operator[](size_t i) noexcept { return rows[i]; }
-
     bool ok{false};
     PgErrorCode code{PgErrorCode::Unknown};
 
@@ -130,11 +119,10 @@ struct QueryResult
     [[nodiscard]] bool has_rows() const noexcept { return ok && rows_valid && !rows.empty(); }
     [[nodiscard]] size_t row_count() const noexcept { return rows.size(); }
     [[nodiscard]] size_t col_count() const noexcept { return rows.empty() ? 0 : rows[0].cols.size(); }
-
-    // Invariant: if rows are non-empty, each Row has non-empty cols
-    [[nodiscard]] bool invariant() const noexcept { return rows.empty() || !rows[0].cols.empty(); }
 };
 ```
+
+---
 
 ### PgErrorDetail
 
@@ -145,26 +133,28 @@ struct PgErrorDetail
     std::string message;
     std::string detail;
     std::string hint;
-    PgSqlStateClass category; // UniqueViolation, Deadlock, etc.
+    PgSqlStateClass category; // UniqueViolation, DeadlockDetected, etc.
 };
 ```
 
+---
+
 ### Semantics
 
-| Field        | Meaning                                  |
-|--------------|------------------------------------------|
-| `ok`         | High-level success indicator             |
-| `code`       | Low-level classification (`PgErrorCode`) |
-| `error`      | Human-readable message                   |
-| `rows`       | Result rows (may be empty)               |
-| `rows_valid` | `false` means truncated or unsafe result |
-| `err_detail` | Parsed SQLSTATE + diagnostic info        |
+| Field        | Meaning                                    |
+|--------------|--------------------------------------------|
+| `ok`         | Operation success flag                     |
+| `code`       | `PgErrorCode` classification               |
+| `error`      | Human-readable error message               |
+| `rows`       | Result rows (may be empty)                 |
+| `rows_valid` | False → truncated or unsafe data           |
+| `err_detail` | Server diagnostics (SQLSTATE, hints, etc.) |
 
-**Row invariants:**
+Row invariants:
 
 * All rows have identical column counts.
-* If `rows` is not empty, each `Row::cols` is also non-empty.
-* If `ok == true` and `rows.empty() == true`, the query succeeded but returned no data.
+* Non-empty rows always have non-empty `cols`.
+* `ok && rows.empty()` → query succeeded, returned zero rows.
 
 ---
 
@@ -184,7 +174,7 @@ if (!res.ok)
 }
 else if (res.empty())
 {
-    std::cout << "[INFO] no rows found\n";
+    std::cout << "[INFO] no rows\n";
 }
 else
 {
@@ -195,54 +185,9 @@ else
 
 ---
 
-## Additional Helpers
-
-### QueryResult methods
-
-| Method                              | Description                                           | Returns          |
-|-------------------------------------|-------------------------------------------------------|------------------|
-| `bool empty() const noexcept`       | `true` if query succeeded but returned **zero rows**. | `true` / `false` |
-| `bool has_rows() const noexcept`    | `true` if query succeeded and returned ≥1 row.        | `true` / `false` |
-| `size_t row_count() const noexcept` | Number of rows in the result.                         | Count            |
-| `size_t col_count() const noexcept` | Number of columns per row (0 if empty).               | Count            |
-| `bool invariant() const noexcept`   | Ensures: non-empty `rows` ⇒ non-empty `cols`.         | `true` / `false` |
-
-**Example:**
-
-```cpp
-auto res = co_await pool.query_awaitable("SELECT id, name FROM users");
-if (res.empty())
-    std::cout << "[INFO] no rows\n";
-else
-    std::cout << "rows=" << res.row_count()
-              << " cols=" << res.col_count() << "\n";
-```
-
----
-
-### Row methods
-
-| Method                         | Description                                                         | Returns                               |
-|--------------------------------|---------------------------------------------------------------------|---------------------------------------|
-| `size_t size() const noexcept` | Number of columns in the row.                                       | Column count                          |
-| `bool empty() const noexcept`  | `true` if row has zero columns (shouldn’t happen in valid results). | `true` / `false`                      |
-| `operator[](size_t i)`         | Access column by index.                                             | `std::string&` / `const std::string&` |
-
-**Example:**
-
-```cpp
-for (auto& row : res.rows)
-{
-    std::cout << "row size=" << row.size() << "\n";
-    std::cout << row[0] << " " << row[1] << "\n";
-}
-```
-
----
-
 ## PgCopyResult
 
-Returned by all COPY operations.
+Used for all COPY operations.
 
 ```cpp
 struct PgCopyResult
@@ -257,16 +202,14 @@ struct PgCopyResult
 };
 ```
 
-**Notes:**
-
-* For `COPY ... FROM STDIN`, `rows_affected` is valid after `copy_in_finish()`.
-* For `COPY ... TO STDOUT`, `copy_out_start()` returns an initial result; actual data arrives in chunks.
+* For `COPY FROM STDIN`, `rows_affected` is valid after `copy_in_finish()`.
+* For `COPY TO STDOUT`, `copy_out_start()` yields this, and data follows via chunks.
 
 ---
 
 ## PgCursorChunk
 
-Used for incremental cursor fetching:
+Used for incremental, streamed fetches:
 
 ```cpp
 struct PgCursorChunk
@@ -282,26 +225,23 @@ struct PgCursorChunk
 };
 ```
 
-`done = true` indicates end-of-cursor.
+`done == true` indicates end-of-stream or exhausted cursor.
 
 ---
 
 ## Summary
 
-| Type            | Purpose                 | Primary data    | End-of-stream signal                       |
-|-----------------|-------------------------|-----------------|--------------------------------------------|
-| `QueryResult`   | Normal SQL / Tx control | `rows`          | N/A                                        |
-| `PgCopyResult`  | COPY IN/OUT             | `rows_affected` | `copy_in_finish()` or empty COPY OUT chunk |
-| `PgCursorChunk` | Cursor fetch            | `rows`          | `done == true` or empty `rows`             |
+| Type            | Purpose                 | Data field      | End signal                     |
+|-----------------|-------------------------|-----------------|--------------------------------|
+| `QueryResult`   | Normal SQL / Tx control | `rows`          | N/A                            |
+| `PgCopyResult`  | COPY IN/OUT             | `rows_affected` | `copy_in_finish()` / EOF chunk |
+| `PgCursorChunk` | Cursor streaming        | `rows`          | `done == true` or empty `rows` |
 
 ---
 
-### Common Patterns
+### Common Usage Notes
 
 * Always check `ok` before using data.
-* Use `empty()` to detect successful queries with no rows.
-* Use `has_rows()` for success with results.
-* `rows_valid == false` → truncated/unsafe result.
-* No exceptions; all information is explicit and type-safe.
-
-```
+* `empty()` → successful query with zero rows.
+* `rows_valid == false` → truncated or partial stream.
+* No exceptions — all outcomes are explicit, structured, and coroutine-friendly.

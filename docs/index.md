@@ -1,62 +1,90 @@
 # upq
 
 `upq` is an asynchronous PostgreSQL client and connection pool for modern C++23.  
-It’s designed for **uvent**, built around coroutines, and avoids libpqxx and blocking calls entirely.
+It’s designed for **uvent**, fully coroutine-based, and built directly on top of **libpq** without libpqxx or any
+blocking calls.
+
+---
 
 ## Design Goals
 
-- Fully non-blocking I/O using `uvent`
-- No extra runtime layers or threads
-- Coroutine-based queries
-- Clean separation between pool, connection, and transaction
+- Fully non-blocking I/O integrated with `uvent`
+- No background threads or runtime schedulers
+- Coroutine-native query interface (`co_await`)
+- Clear layering: pool → connection → transaction
 - Minimal allocations and zero unnecessary copies
-- Opt-in reflection for ergonomic reads/writes (zero boilerplate, positional mapping)
+- **Compile-time reflection** for type-safe query/parameter mapping
+
+---
 
 ## Components
 
-| Component             | Purpose                                                   |
-|-----------------------|-----------------------------------------------------------|
-| **PgPool**            | Global connection pool, manages `PGconn` instances        |
-| **PgConnectionLibpq** | Async low-level PostgreSQL connection wrapper             |
-| **PgTransaction**     | Transaction wrapper built on pooled connections           |
-| **QueryResult**       | Lightweight query result container                        |
-| **PgReflect**         | Header-only reflect helpers and mappers (positional only) |
+| Component             | Purpose                                                  |
+|-----------------------|----------------------------------------------------------|
+| **PgPool**            | Global async connection pool (`PGconn` management)       |
+| **PgConnectionLibpq** | Non-blocking wrapper over `libpq` I/O and protocol state |
+| **PgTransaction**     | Transactional wrapper on pinned pooled connection        |
+| **QueryResult**       | Lightweight structured query result                      |
+| **PgReflect**         | Header-only reflection bridge for struct ↔ SQL mapping   |
+
+---
 
 ## Features
 
-- **Reflect-aware SELECT** → `std::vector<T>` / `std::optional<T>`  
-  Positional mapping: column order in `SELECT` must match the field order of `T` (or tuple elements).
-- **Reflect-aware params** for `INSERT/UPDATE`:
-    - Aggregates/tuples are expanded into multiple `$1..$N` parameters.
-    - Containers (`std::vector`, `std::array`, `T[N]`, `initializer_list`) are sent as a single typed PostgreSQL array
-      parameter.
-    - `std::optional<T>` maps to `NULL` or a value.
-- Stays close to libpq semantics; no hidden background threads, no magic.
+- **Reflect-aware SELECT / EXEC** via [ureflect](https://github.com/Usub-development/ureflect)
+    - `query_reflect<T>(sql, ...)` → returns `std::vector<T>`
+    - `query_reflect_one<T>(sql, ...)` → returns `std::optional<T>`
+    - `exec_reflect(sql, obj)` → uses struct or tuple fields as parameters
+- **Name-based mapping**  
+  Struct fields are matched to SQL columns **by name** (aliases like `AS username` supported).  
+  Falls back to positional order if names are unavailable.
+- **Array and optional support**
+    - `std::optional<T>` ↔ `NULL`
+    - `std::vector<T>`, `std::array<T,N>`, C arrays ↔ PostgreSQL arrays (`INT4[]`, `TEXT[]`, …)
+- **No hidden layers** — stays close to raw `libpq`, but coroutine-safe and zero-overhead.
+- **Async everywhere** — `connect`, `query`, `commit`, `LISTEN/NOTIFY`, `COPY`, all awaitable.
 
-**Tiny example**
+---
+
+### Example
 
 ```cpp
-struct User { int64_t id; std::string name; std::optional<std::string> password; };
+struct User
+{
+    int64_t id;
+    std::string username;
+    std::optional<std::string> password;
+    std::vector<int> roles;
+    std::vector<std::string> tags;
+};
 
-// Read many
+// SELECT with name-based mapping
 auto users = co_await pool.query_reflect<User>(
-    "SELECT id, name, password FROM users ORDER BY id LIMIT 100"
+    "SELECT id, name AS username, password, roles, tags FROM users ORDER BY id LIMIT 100;"
 );
 
-// Insert from aggregate
-struct NewUser { std::string name; std::optional<std::string> password; std::vector<int> roles; };
-NewUser nu{"alice", std::nullopt, {1,2}};
-co_await pool.exec_reflect(
-    "INSERT INTO users(name, password, roles) VALUES ($1,$2,$3)",
+// INSERT from aggregate
+struct NewUser
+{
+    std::string name;
+    std::optional<std::string> password;
+    std::vector<int> roles;
+};
+NewUser nu{"alice", std::nullopt, {1, 2}};
+
+auto res = co_await pool.exec_reflect(
+    "INSERT INTO users(name, password, roles) VALUES ($1,$2,$3);",
     nu
 );
 ```
 
+---
+
 ## What it *doesn’t* do
 
-* No ORM
-* No query builders or migration tools
-* No automatic reconnection or retry logic
-* No external dependencies besides `libpq` and `uvent`
+* No ORM, no hidden state machines
+* No query builders or migrations
+* No automatic retries or reconnection loops
+* No dependencies beyond `libpq` and `uvent`
 
-The philosophy: **use coroutines, keep it minimal, and let the compiler inline everything**.
+**Philosophy:** minimal abstractions, predictable control, and **compile-time reflection instead of boilerplate.**

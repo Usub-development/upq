@@ -44,8 +44,8 @@ task::Awaitable<void> create_schema()
         "id SERIAL PRIMARY KEY,"
         "name TEXT,"
         "password TEXT,"
-        "roles INT[],"
-        "tags TEXT[]);"
+        "roles INT4[],"
+        "tags  TEXT[]);"
     );
 
     if (!res.ok)
@@ -115,16 +115,16 @@ task::Awaitable<void> get_user(int user_id)
 
 ## 5. Reflect-based queries (struct mapping)
 
-Reflection allows automatic binding of aggregates and tuples to query parameters,
-and automatic mapping of query results into structs.
+Reflection provides automatic binding of aggregates/tuples to parameters
+and automatic row → struct decoding. **Name-based mapping with aliases** is supported.
 
-### SELECT → `std::vector<T>` or `std::optional<T>`
+### SELECT → `std::vector<T>` / `std::optional<T>`
 
 ```cpp
 struct UserRow
 {
     int64_t id;
-    std::string name;
+    std::string username;                   // maps from SQL alias: "name AS username"
     std::optional<std::string> password;
     std::vector<int> roles;
     std::vector<std::string> tags;
@@ -135,16 +135,30 @@ task::Awaitable<void> get_all()
     auto& pool = usub::pg::PgPool::instance();
 
     auto rows = co_await pool.query_reflect<UserRow>(
-        "SELECT id, name, password, roles, tags FROM users ORDER BY id;"
+        "SELECT id, name AS username, password, roles, tags FROM users ORDER BY id;"
     );
 
     for (auto& r : rows)
-        std::cout << "user=" << r.name << "\n";
+        std::cout << "user=" << r.username << "\n";
+    co_return;
+}
+
+task::Awaitable<void> get_one(int64_t id)
+{
+    auto& pool = usub::pg::PgPool::instance();
+
+    auto one = co_await pool.query_reflect_one<UserRow>(
+        "SELECT id, name AS username, password, roles, tags FROM users WHERE id = $1;",
+        id // parameters are supported with query_reflect(_one)
+    );
+
+    if (one)
+        std::cout << "found " << one->username << "\n";
     co_return;
 }
 ```
 
-### Aggregate → parameters
+### Aggregate/tuple → parameters
 
 ```cpp
 struct NewUser
@@ -155,27 +169,34 @@ struct NewUser
     std::vector<std::string> tags;
 };
 
-task::Awaitable<void> insert_user()
+task::Awaitable<void> insert_user_reflect()
 {
-    NewUser u{ "bob", std::nullopt, {1, 2}, {"vip"} };
+    auto& pool = usub::pg::PgPool::instance();
 
-    auto res = co_await usub::pg::PgPool::instance().exec_reflect(
+    NewUser u{ "bob", std::nullopt, {1, 2}, {"vip"} };
+    auto r1 = co_await pool.exec_reflect(
         "INSERT INTO users(name, password, roles, tags) VALUES ($1,$2,$3,$4);",
         u
     );
 
-    if (!res.ok)
-        std::cout << "Insert failed: " << res.error << "\n";
+    // tuple works too
+    auto r2 = co_await pool.exec_reflect(
+        "INSERT INTO users(name, password, roles, tags) VALUES ($1,$2,$3,$4);",
+        std::tuple{ std::string{"alice"}, std::optional<std::string>{"x"}, std::vector<int>{3,4}, std::vector<std::string>{"dev","core"} }
+    );
+
+    (void)r1; (void)r2;
     co_return;
 }
 ```
 
 ### Rules
 
-* Field order in `SELECT` must match the order of members in the struct.
-* `std::optional<T>` → NULL or value.
-* Containers (`vector`, `array`, etc.) → PostgreSQL arrays.
-* Aggregate/tuple expands into multiple `$1..$N` parameters.
+* **Name-based** field matching; SQL aliases like `AS username` supported.
+  If column names are unavailable, decoder falls back to positional order.
+* `std::optional<T>` ↔ `NULL`.
+* Standard containers (`vector`, fixed C-arrays, `initializer_list`) ↔ PostgreSQL arrays.
+* Aggregates/tuples expand into `$1..$N` parameters.
 
 ---
 
@@ -184,31 +205,34 @@ task::Awaitable<void> insert_user()
 Every query returns structured error information:
 
 ```cpp
+auto& pool = usub::pg::PgPool::instance();
 auto res = co_await pool.query_awaitable("SELECT * FROM nonexistent;");
 if (!res.ok) {
     std::cout
-        << "Error: " << res.error
-        << " code=" << (uint32_t)res.code
-        << " sqlstate=" << res.server_sqlstate << "\n";
+        << "Error: "   << res.error
+        << " code="     << static_cast<uint32_t>(res.code)
+        << " sqlstate=" << res.err_detail.sqlstate
+        << " detail="   << res.err_detail.detail
+        << " hint="     << res.err_detail.hint
+        << "\n";
 }
 ```
 
-`PgErrorCode` helps classify errors (`ConnectionClosed`, `ServerError`, `SocketReadFailed`, etc.).
 Use `rows_valid` to ensure result integrity before iterating.
 
 ---
 
 ## Field reference
 
-| Field             | Description                                    |
-|-------------------|------------------------------------------------|
-| `ok`              | `true` if operation completed successfully     |
-| `code`            | Structured category (`PgErrorCode`)            |
-| `error`           | Human-readable message                         |
-| `server_sqlstate` | SQLSTATE returned by PostgreSQL                |
-| `server_detail`   | Additional context from PostgreSQL             |
-| `server_hint`     | PostgreSQL’s suggested fix                     |
-| `rows_valid`      | `false` means row data incomplete or corrupted |
+| Field          | Description                                     |
+|----------------|-------------------------------------------------|
+| `ok`           | `true` if operation completed successfully      |
+| `code`         | Structured category (`PgErrorCode`)             |
+| `error`        | Human-readable message                          |
+| `err_detail.*` | `{sqlstate, message, detail, hint}` from server |
+| `rows_valid`   | `false` means row data incomplete or corrupted  |
+| `columns`      | Column names (when available)                   |
+| `rows`         | Result rows/columns as text slices              |
 
 ---
 
@@ -231,9 +255,9 @@ Use `rows_valid` to ensure result integrity before iterating.
 auto res = co_await pool.query_awaitable("SELECT id, name FROM users;");
 if (!res.ok) {
     std::cout
-        << "Error: " << res.error
-        << " (code=" << (uint32_t)res.code
-        << ", sqlstate=" << res.server_sqlstate << ")\n";
+        << "Error: "   << res.error
+        << " code="     << static_cast<uint32_t>(res.code)
+        << " sqlstate=" << res.err_detail.sqlstate << "\n";
 } else if (!res.rows_valid) {
     std::cout << "Data stream incomplete\n";
 } else {
