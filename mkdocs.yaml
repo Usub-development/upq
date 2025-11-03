@@ -54,6 +54,7 @@ nav:
   - Quickstart: quickstart.md
   - Connection Pool: pool.md
   - Transactions: transaction.md
+  - Routing: routing.md
   - Query Result: results.md
   - Notifications (LISTEN / NOTIFY): notifications.md
   - Notification Multiplexer: notification-multiplexer.md
