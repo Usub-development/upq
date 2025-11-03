@@ -492,33 +492,6 @@ namespace usub::pg
         }
         return out;
     }
-
-    // --------------------- DML passthrough ---------------------
-    template <class T>
-        requires detail::ReflectAggregate<T>
-    inline usub::uvent::task::Awaitable<QueryResult>
-    exec_param_query_nonblocking_reflect(PgConnectionLibpq& conn, const std::string& sql, const T& obj)
-    {
-        co_return co_await conn.exec_param_query_nonblocking(sql, obj);
-    }
-
-    template <class Tuple>
-        requires (detail::is_tuple_like_v<Tuple>)
-    inline usub::uvent::task::Awaitable<QueryResult>
-    exec_param_query_nonblocking_reflect(PgConnectionLibpq& conn, const std::string& sql, const Tuple& tup)
-    {
-        co_return co_await conn.exec_param_query_nonblocking(sql, tup);
-    }
-
-    template <class T, class F>
-        requires detail::ReflectAggregate<T>
-    inline usub::uvent::task::Awaitable<QueryResult>
-    exec_param_query_nonblocking_reflect_build(PgConnectionLibpq& conn, const std::string& sql, F&& fill)
-    {
-        T obj{};
-        fill(obj);
-        co_return co_await conn.exec_param_query_nonblocking(sql, obj);
-    }
 } // namespace usub::pg
 
 #endif // PGREFLECT_H

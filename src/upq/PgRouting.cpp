@@ -180,11 +180,6 @@ namespace usub::pg
     usub::uvent::task::Awaitable<std::pair<std::chrono::milliseconds, uint64_t>>
     PgConnector::probe_replication_lag(PgPool& pool)
     {
-        struct Row
-        {
-            int64_t lag_ms;
-            int64_t lsn_lag;
-        };
         auto opt = co_await pool.query_reflect_one<Row>(R"SQL(
         SELECT
           COALESCE( (EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())) * 1000)::bigint, 0 ) AS lag_ms,

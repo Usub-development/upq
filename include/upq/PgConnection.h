@@ -451,6 +451,57 @@ namespace usub::pg
             }
         }
 
+        template <class T, typename... Args>
+        usub::uvent::task::Awaitable<std::vector<T>>
+        exec_param_query_nonblocking(const std::string& sql, Args&&... args)
+        {
+            using Fn = usub::uvent::task::Awaitable<usub::pg::QueryResult>
+                (PgConnectionLibpq::*)(const std::string&, Args&&...);
+
+            usub::pg::QueryResult qr = co_await this->exec_param_query_nonblocking(
+                sql, std::forward<Args>(args)...);
+
+            if (!qr.ok)
+            {
+                co_return std::vector<T>{};
+            }
+
+            try
+            {
+                auto vec = usub::pg::map_all_reflect_named<T>(qr);
+                co_return vec;
+            }
+            catch (const std::exception& e)
+            {
+                UPQ_CONN_DBG("param-named-map FAIL: %s — fallback to positional", e.what());
+                auto vec = usub::pg::map_all_reflect_positional<T>(qr);
+                co_return vec;
+            }
+        }
+
+        template <class T, typename... Args>
+        usub::uvent::task::Awaitable<std::optional<T>>
+        exec_param_query_one_nonblocking(const std::string& sql, Args&&... args)
+        {
+            usub::pg::QueryResult qr = co_await this->exec_param_query_nonblocking(
+                sql, std::forward<Args>(args)...);
+
+            if (!qr.ok || qr.rows.empty())
+                co_return std::nullopt;
+
+            try
+            {
+                auto v = usub::pg::map_single_reflect_named<T>(qr, 0);
+                co_return v;
+            }
+            catch (const std::exception& e)
+            {
+                UPQ_CONN_DBG("param-named-one FAIL: %s — fallback to positional", e.what());
+                auto v = usub::pg::map_single_reflect_positional<T>(qr, 0);
+                co_return v;
+            }
+        }
+
         usub::uvent::task::Awaitable<PgCopyResult> copy_in_start(const std::string& sql);
         usub::uvent::task::Awaitable<PgCopyResult> copy_in_send_chunk(const void* data, size_t len);
         usub::uvent::task::Awaitable<PgCopyResult> copy_in_finish();

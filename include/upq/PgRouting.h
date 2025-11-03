@@ -88,6 +88,12 @@ namespace usub::pg
         HealthCfg health{};
     };
 
+    struct Row
+    {
+        int64_t lag_ms;
+        int64_t lsn_lag;
+    };
+
     class PgConnector
     {
     public:

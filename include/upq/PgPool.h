@@ -13,9 +13,6 @@
 #include "PgTypes.h"
 #include "uvent/utils/datastructures/queue/ConcurrentQueues.h"
 
-// Note: No API changes. Only uses existing connection methods,
-// including reflect-aware helpers from PgConnection.
-
 namespace usub::pg
 {
     class PgPool
@@ -30,18 +27,15 @@ namespace usub::pg
 
         ~PgPool();
 
-        // Acquire a connected pooled connection (coroutine-suspending).
         usub::uvent::task::Awaitable<std::shared_ptr<PgConnectionLibpq>>
         acquire_connection();
 
-        // Fast-path release: retires if dirty.
         void release_connection(std::shared_ptr<PgConnectionLibpq> conn);
 
-        // Async release: drains pending results before recycling.
         usub::uvent::task::Awaitable<void>
         release_connection_async(std::shared_ptr<PgConnectionLibpq> conn);
 
-        // ---------- existing API ----------
+        // ---------- существующий API ----------
         template <typename... Args>
         usub::uvent::task::Awaitable<QueryResult>
         query_on(std::shared_ptr<PgConnectionLibpq> const& conn,
@@ -52,6 +46,7 @@ namespace usub::pg
         usub::uvent::task::Awaitable<QueryResult>
         query_awaitable(const std::string& sql, Args&&... args);
 
+        // -------- reflect => T (без параметров)
         template <class T>
         usub::uvent::task::Awaitable<std::vector<T>>
         query_on_reflect(std::shared_ptr<PgConnectionLibpq> const& conn,
@@ -70,6 +65,26 @@ namespace usub::pg
         usub::uvent::task::Awaitable<std::optional<T>>
         query_reflect_one(const std::string& sql);
 
+        // -------- reflect => T (с параметрами, variadic)
+        template <class T, typename... Args>
+        usub::uvent::task::Awaitable<std::vector<T>>
+        query_on_reflect(std::shared_ptr<PgConnectionLibpq> const& conn,
+                         const std::string& sql, Args&&... args);
+
+        template <class T, typename... Args>
+        usub::uvent::task::Awaitable<std::optional<T>>
+        query_on_reflect_one(std::shared_ptr<PgConnectionLibpq> const& conn,
+                             const std::string& sql, Args&&... args);
+
+        template <class T, typename... Args>
+        usub::uvent::task::Awaitable<std::vector<T>>
+        query_reflect(const std::string& sql, Args&&... args);
+
+        template <class T, typename... Args>
+        usub::uvent::task::Awaitable<std::optional<T>>
+        query_reflect_one(const std::string& sql, Args&&... args);
+
+        // -------- exec_reflect (DML/DDL с объектом)
         template <class Obj>
         usub::uvent::task::Awaitable<QueryResult>
         exec_reflect_on(std::shared_ptr<PgConnectionLibpq> const& conn,
@@ -86,7 +101,6 @@ namespace usub::pg
         inline std::string db() { return this->db_; }
         inline std::string password() { return this->password_; }
 
-        // Mark a connection as dead (do not recycle).
         void mark_dead(std::shared_ptr<PgConnectionLibpq> const& conn);
 
         struct HealthStats
@@ -105,7 +119,6 @@ namespace usub::pg
         std::string db_;
         std::string password_;
 
-        // Lock-free idle queue of connections.
         usub::queue::concurrent::MPMCQueue<std::shared_ptr<PgConnectionLibpq>> idle_;
 
         size_t max_pool_;
@@ -171,7 +184,6 @@ namespace usub::pg
         if (!conn || !conn->connected())
             co_return std::vector<T>{};
 
-        // Uses connection's reflect-aware overload (positional or name-based per PgConnection)
         auto rows = co_await conn->exec_simple_query_nonblocking<T>(sql);
         co_return rows;
     }
@@ -204,6 +216,55 @@ namespace usub::pg
     {
         auto conn = co_await acquire_connection();
         auto row = co_await query_on_reflect_one<T>(conn, sql);
+        co_await release_connection_async(conn);
+        co_return row;
+    }
+
+    // ---- reflect с параметрами ----
+    template <class T, typename... Args>
+    usub::uvent::task::Awaitable<std::vector<T>>
+    PgPool::query_on_reflect(std::shared_ptr<PgConnectionLibpq> const& conn,
+                             const std::string& sql, Args&&... args)
+    {
+        if (!conn || !conn->connected())
+            co_return std::vector<T>{};
+
+        auto rows = co_await conn->exec_param_query_nonblocking<T>(
+            sql, std::forward<Args>(args)...);
+        co_return rows;
+    }
+
+    template <class T, typename... Args>
+    usub::uvent::task::Awaitable<std::optional<T>>
+    PgPool::query_on_reflect_one(std::shared_ptr<PgConnectionLibpq> const& conn,
+                                 const std::string& sql, Args&&... args)
+    {
+        if (!conn || !conn->connected())
+            co_return std::nullopt;
+
+        auto row = co_await conn->exec_param_query_one_nonblocking<T>(
+            sql, std::forward<Args>(args)...);
+        co_return row;
+    }
+
+    template <class T, typename... Args>
+    usub::uvent::task::Awaitable<std::vector<T>>
+    PgPool::query_reflect(const std::string& sql, Args&&... args)
+    {
+        auto conn = co_await acquire_connection();
+        auto rows = co_await query_on_reflect<T>(
+            conn, sql, std::forward<Args>(args)...);
+        co_await release_connection_async(conn);
+        co_return rows;
+    }
+
+    template <class T, typename... Args>
+    usub::uvent::task::Awaitable<std::optional<T>>
+    PgPool::query_reflect_one(const std::string& sql, Args&&... args)
+    {
+        auto conn = co_await acquire_connection();
+        auto row = co_await query_on_reflect_one<T>(
+            conn, sql, std::forward<Args>(args)...);
         co_await release_connection_async(conn);
         co_return row;
     }

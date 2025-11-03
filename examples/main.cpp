@@ -1,5 +1,11 @@
 #include <chrono>
 #include <iostream>
+#include <string>
+#include <vector>
+#include <optional>
+#include <array>
+#include <list>
+
 #include "uvent/Uvent.h"
 #include "upq/PgPool.h"
 #include "upq/PgTransaction.h"
@@ -24,6 +30,29 @@ struct UserRow
     std::optional<std::string> password;
     std::vector<int> roles;
     std::vector<std::string> tags;
+};
+
+struct ByName
+{
+    std::string name;
+};
+
+struct Ret
+{
+    int64_t id;
+    std::string username;
+};
+
+struct Upd
+{
+    std::string name;
+    int64_t id;
+};
+
+struct UpdRoles
+{
+    std::vector<int> roles;
+    int64_t id;
 };
 
 task::Awaitable<void> test_db_query(usub::pg::PgPool& pool)
@@ -54,22 +83,35 @@ task::Awaitable<void> test_db_query(usub::pg::PgPool& pool)
 
         if (!res_schema.ok)
         {
-            std::cout << "[ERROR] SCHEMA INIT failed: " << res_schema.error << std::endl;
+            std::cout << "[ERROR] INSERT failed: " << res_schema.error << std::endl;
             co_return;
         }
     }
 
     {
+        auto res = co_await pool.query_awaitable(R"SQL(
+            CREATE TABLE IF NOT EXISTS array_test (
+                id         bigserial PRIMARY KEY,
+                test_array text[] NOT NULL,
+                comment    text
+            );
+        )SQL");
+        if (!res.ok)
+        {
+            std::cout << "[ERROR] CREATE array_test: " << res.error << "\n";
+            co_return;
+        }
+
         std::vector<std::string> array = {"test", "array"};
-        auto res_schema = co_await pool.query_awaitable(
+        auto ins = co_await pool.query_awaitable(
             R"(INSERT INTO array_test (test_array, comment) VALUES ($1, $2);)",
             array,
             "comment"
         );
 
-        if (!res_schema.ok)
+        if (!ins.ok)
         {
-            std::cout << "[ERROR] SCHEMA INIT failed: " << res_schema.error << std::endl;
+            std::cout << "[ERROR] INSERT array_test: " << ins.error << std::endl;
             co_return;
         }
     }
@@ -101,8 +143,8 @@ task::Awaitable<void> test_db_query(usub::pg::PgPool& pool)
 
             if (!r_upd.rows.empty() && !r_upd.rows[0].cols.empty())
             {
-                std::cout << "[INFO] UPDATE ok, new name=" << r_upd.rows[0].cols[0] << ", affected rows: " << r_upd.
-                    rows_affected << std::endl;
+                std::cout << "[INFO] UPDATE ok, new name=" << r_upd.rows[0].cols[0]
+                    << ", affected rows: " << r_upd.rows_affected << std::endl;
             }
             else
             {
@@ -171,6 +213,12 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
         }
 
         {
+            auto r = co_await pool.query_awaitable("TRUNCATE TABLE public.users_reflect RESTART IDENTITY");
+            if (!r.ok) { std::cout << "[ERROR] truncate: " << r.error << "\n"; co_return; }
+        }
+
+        // insert #1 (aggregate)
+        {
             NewUser u{};
             u.name = "Alice";
             u.password = std::nullopt;
@@ -181,15 +229,11 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
                 "INSERT INTO users_reflect(name, password, roles, tags) VALUES($1,$2,$3,$4);",
                 u
             );
-
-            if (!r.ok)
-            {
-                std::cout << "[ERROR] insert: " << r.error << "\n";
-                co_return;
-            }
+            if (!r.ok) { std::cout << "[ERROR] insert: " << r.error << "\n"; co_return; }
             std::cout << "[OK] inserted rows: " << r.rows_affected << "\n";
         }
 
+        // insert #2 (tuple)
         {
             std::string name = "Bob";
             std::optional<std::string> pass = std::make_optional<std::string>("x");
@@ -200,15 +244,11 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
                 "INSERT INTO users_reflect(name, password, roles, tags) VALUES($1,$2,$3,$4);",
                 std::tuple{name, pass, roles, tags}
             );
-
-            if (!r2.ok)
-            {
-                std::cout << "[ERROR] insert tuple: " << r2.error << "\n";
-                co_return;
-            }
+            if (!r2.ok) { std::cout << "[ERROR] insert tuple: " << r2.error << "\n"; co_return; }
             std::cout << "[OK] inserted rows (tuple): " << r2.rows_affected << "\n";
         }
 
+        // dump all
         {
             auto rows = co_await pool.query_reflect<UserRow>(
                 "SELECT id, password, name AS username, roles, tags FROM users_reflect ORDER BY id;"
@@ -243,19 +283,143 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
             }
         }
 
+        // ONE by literal
         {
             auto one = co_await pool.query_reflect_one<UserRow>(
-                "SELECT id, name, password, roles, tags FROM users_reflect WHERE name='Alice' LIMIT 1;"
+                "SELECT id, name AS username, password, roles, tags "
+                "FROM users_reflect WHERE name='Alice' LIMIT 1;"
+            );
+            if (one) std::cout << "[ONE] id=" << one->id << " name=" << one->username << "\n";
+            else     std::cout << "[ONE] not found\n";
+        }
+
+        // 1) BY-ID
+        {
+            int64_t qid = 1;
+            auto one = co_await pool.query_reflect_one<UserRow>(
+                "SELECT id, name AS username, password, roles, tags "
+                "FROM users_reflect WHERE id = $1",
+                qid
+            );
+            std::cout << "[BY-ID] " << (one ? one->username : "<none>") << "\n";
+        }
+
+        // 2) BY-NAME
+        {
+            std::string q_name = "Alice";
+            auto one = co_await pool.query_reflect_one<UserRow>(
+                "SELECT id, name AS username, password, roles, tags "
+                "FROM users_reflect WHERE name = $1",
+                q_name
+            );
+            std::cout << "[BY-NAME] " << (one ? one->username : "<none>") << "\n";
+        }
+
+        // 3) TAGS-OVERLAP
+        {
+            std::vector<std::string> need_tags{"admin", "labs"};
+            auto rows = co_await pool.query_reflect<UserRow>(
+                "SELECT id, name AS username, password, roles, tags "
+                "FROM users_reflect "
+                "WHERE tags && $1::text[] "
+                "ORDER BY id",
+                need_tags
+            );
+            std::cout << "[TAGS-OVERLAP] n=" << rows.size() << "\n";
+        }
+
+        // 4) ROLES-OVERLAP
+        {
+            std::array<int, 3> role_set{1, 2, 5};
+            auto rows = co_await pool.query_reflect<UserRow>(
+                "SELECT id, name AS username, password, roles, tags "
+                "FROM users_reflect "
+                "WHERE roles && $1::int4[] "
+                "ORDER BY id",
+                role_set
+            );
+            std::cout << "[ROLES-OVERLAP] n=" << rows.size() << "\n";
+        }
+
+        // 5) PWD=NULL
+        {
+            std::optional<std::string> pass = std::nullopt;
+            auto rows = co_await pool.query_reflect<UserRow>(
+                "SELECT id, name AS username, password, roles, tags "
+                "FROM users_reflect "
+                "WHERE password IS NOT DISTINCT FROM $1 "
+                "ORDER BY id",
+                pass
+            );
+            std::cout << "[PWD=NULL] n=" << rows.size() << "\n";
+        }
+
+        // 6) ANY(ids)
+        {
+            std::vector<int64_t> ids{1, 2, 3, 4};
+            auto rows = co_await pool.query_reflect<UserRow>(
+                "SELECT id, name AS username, password, roles, tags "
+                "FROM users_reflect "
+                "WHERE id = ANY($1::int8[]) "
+                "ORDER BY id",
+                ids
+            );
+            std::cout << "[ANY(ids)] n=" << rows.size() << "\n";
+        }
+
+        // 7) PAGE
+        {
+            int limit = 2, offset = 0;
+            auto page = co_await pool.query_reflect<UserRow>(
+                "SELECT id, name AS username, password, roles, tags "
+                "FROM users_reflect "
+                "ORDER BY id LIMIT $1 OFFSET $2",
+                limit, offset
+            );
+            std::cout << "[PAGE] n=" << page.size()
+                      << " (limit=" << limit << ", off=" << offset << ")\n";
+        }
+
+        // 8) UPDATE … RETURNING -> Ret (CTE + fallback)
+        {
+            Upd u{.name = "Alice-upd", .id = 1};
+
+            auto ret = co_await pool.query_reflect_one<Ret>(
+                "WITH upd AS ("
+                "  UPDATE users_reflect SET name = $1 WHERE id = $2 "
+                "  RETURNING id, name"
+                ") "
+                "SELECT id, name AS username FROM upd",
+                u
             );
 
-            if (one)
+            if (!ret)
             {
-                std::cout << "[ONE] id=" << one->id << " name=" << one->username << "\n";
+                auto check = co_await pool.query_reflect_one<Ret>(
+                    "SELECT id, name AS username FROM users_reflect WHERE id = $1",
+                    u.id
+                );
+                std::cout << "[UPDATE->RET] " << (check ? check->username : "<none>") << "\n";
             }
             else
             {
-                std::cout << "[ONE] not found\n";
+                std::cout << "[UPDATE->RET] " << ret->username << "\n";
             }
+        }
+
+        // 9) MIXED
+        {
+            std::optional<std::string> patt = std::string("%ali%");
+            std::optional<int64_t> min_id = int64_t{0};
+            auto rows = co_await pool.query_reflect<UserRow>(
+                "SELECT id, name AS username, password, roles, tags "
+                "FROM users_reflect "
+                "WHERE ($1::text IS NULL OR name ILIKE $1) "
+                "AND ($2::int8 IS NULL OR id >= $2) "
+                "ORDER BY id",
+                patt, min_id
+            );
+            std::cout << "[MIXED] n=" << rows.size() << "\n";
         }
     }
     catch (std::exception& e)
@@ -316,12 +480,7 @@ usub::uvent::task::Awaitable<void> tx_reflect_example(usub::pg::PgPool& pool)
         auto sub = tx.make_subtx();
         if (co_await sub.begin())
         {
-            struct Upd
-            {
-                std::vector<int> roles;
-                int64_t id;
-            };
-            Upd u{.roles = {9, 9, 9}, .id = 1};
+            UpdRoles u{.roles = {9, 9, 9}, .id = 1};
             auto r = co_await sub.query_reflect(
                 "UPDATE users_r SET roles = $1 WHERE id = $2", u
             );
@@ -333,7 +492,7 @@ usub::uvent::task::Awaitable<void> tx_reflect_example(usub::pg::PgPool& pool)
 
     {
         auto rows = co_await tx.select_reflect<UserRow>(
-            "SELECT id, name, password, roles, tags FROM users_r ORDER BY id LIMIT 10"
+            "SELECT id, name AS username, password, roles, tags FROM users_r ORDER BY id LIMIT 10"
         );
         std::cout << "[SELECT]\n";
         for (auto& u : rows)
