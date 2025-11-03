@@ -156,27 +156,10 @@ if (one) spdlog::info("Found user: {}", one->username);
 ### 🧱 Example Schema
 
 ```sql
-CREATE TABLE IF NOT EXISTS public.users_reflect
-(
-    id
-    BIGSERIAL
-    PRIMARY
-    KEY,
-    name
-    TEXT
-    NOT
-    NULL,
-    password
-    TEXT,
-    roles
-    INT4[]
-    NOT
-    NULL,
-    tags
-    TEXT
-[]
-    NOT
-    NULL
+CREATE TABLE IF NOT EXISTS public.users_reflect (
+    id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL,
+    password TEXT, roles INT4[] NOT NULL,
+    tags TEXT [] NOT NULL
 );
 ```
 
