@@ -1,3 +1,4 @@
+// PgRouting.h
 #ifndef PG_ROUTING_H
 #define PG_ROUTING_H
 
@@ -69,6 +70,9 @@ namespace usub::pg
         uint32_t interval_ms{500};
         uint32_t lag_threshold_ms{120};
         std::string rtt_probe_sql{"SELECT 1"};
+        uint32_t cb_quiet_ms{500};
+        uint32_t cb_backoff_ms{1000};
+        uint32_t cb_max_ms{1500};
     };
 
     struct RoutingCfg
@@ -103,11 +107,13 @@ namespace usub::pg
 
         PgPool* route_for_tx(const PgTransactionConfig& tx);
 
+        usub::uvent::task::Awaitable<void> start_health_loop();
+
         usub::uvent::task::Awaitable<void> health_tick();
 
         PgPool* pin(const std::string& node_name, const RouteHint&);
 
-        const Config& config() const { return cfg_; }
+        const Config& config() const { return this->cfg_; }
 
     private:
         struct Node
@@ -125,20 +131,14 @@ namespace usub::pg
 
         Node* pick_primary();
         Node* pick_best_replica(const RouteHint& hint);
-
-        static bool is_replica(NodeRole r)
-        {
-            return r == NodeRole::SyncReplica || r == NodeRole::AsyncReplica || r == NodeRole::Analytics;
-        }
-
-        static bool is_usable(NodeRole r) { return r != NodeRole::Archive && r != NodeRole::Maintenance; }
-
+        bool ensure_pool(Node& n);
+        static bool is_replica(NodeRole r);
+        static bool is_usable(NodeRole r);
         usub::uvent::task::Awaitable<bool> probe_healthy(PgPool& pool);
         usub::uvent::task::Awaitable<std::chrono::milliseconds> probe_rtt(PgPool& pool, const std::string& sql);
         usub::uvent::task::Awaitable<std::pair<std::chrono::milliseconds, uint64_t>>
         probe_replication_lag(PgPool& pool);
-
         void apply_circuit_breaker(Node& n, bool ok);
     };
-} // namespace usub::pg
+}
 #endif

@@ -12,6 +12,8 @@
 #include "upq/PgNotificationListener.h"
 #include "upq/PgNotificationMultiplexer.h"
 #include "upq/PgReflect.h"
+#include "upq/PgRouting.h"
+#include "upq/PgRoutingBuilder.h"
 
 using namespace usub::uvent;
 
@@ -214,7 +216,11 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
 
         {
             auto r = co_await pool.query_awaitable("TRUNCATE TABLE public.users_reflect RESTART IDENTITY");
-            if (!r.ok) { std::cout << "[ERROR] truncate: " << r.error << "\n"; co_return; }
+            if (!r.ok)
+            {
+                std::cout << "[ERROR] truncate: " << r.error << "\n";
+                co_return;
+            }
         }
 
         // insert #1 (aggregate)
@@ -229,7 +235,11 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
                 "INSERT INTO users_reflect(name, password, roles, tags) VALUES($1,$2,$3,$4);",
                 u
             );
-            if (!r.ok) { std::cout << "[ERROR] insert: " << r.error << "\n"; co_return; }
+            if (!r.ok)
+            {
+                std::cout << "[ERROR] insert: " << r.error << "\n";
+                co_return;
+            }
             std::cout << "[OK] inserted rows: " << r.rows_affected << "\n";
         }
 
@@ -244,7 +254,11 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
                 "INSERT INTO users_reflect(name, password, roles, tags) VALUES($1,$2,$3,$4);",
                 std::tuple{name, pass, roles, tags}
             );
-            if (!r2.ok) { std::cout << "[ERROR] insert tuple: " << r2.error << "\n"; co_return; }
+            if (!r2.ok)
+            {
+                std::cout << "[ERROR] insert tuple: " << r2.error << "\n";
+                co_return;
+            }
             std::cout << "[OK] inserted rows (tuple): " << r2.rows_affected << "\n";
         }
 
@@ -290,7 +304,7 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
                 "FROM users_reflect WHERE name='Alice' LIMIT 1;"
             );
             if (one) std::cout << "[ONE] id=" << one->id << " name=" << one->username << "\n";
-            else     std::cout << "[ONE] not found\n";
+            else std::cout << "[ONE] not found\n";
         }
 
         // 1) BY-ID
@@ -377,7 +391,7 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
                 limit, offset
             );
             std::cout << "[PAGE] n=" << page.size()
-                      << " (limit=" << limit << ", off=" << offset << ")\n";
+                << " (limit=" << limit << ", off=" << offset << ")\n";
         }
 
         // 8) UPDATE … RETURNING -> Ret (CTE + fallback)
@@ -907,6 +921,44 @@ task::Awaitable<void> massive_ops_example(usub::pg::PgPool& pool)
     co_return;
 }
 
+usub::uvent::task::Awaitable<void> routing_example()
+{
+    using namespace usub::pg;
+    using namespace std::chrono_literals;
+
+    PgConnector router = PgConnectorBuilder{}
+                         .node("primary1", "localhost", "12432", "postgres", "postgres", "password", NodeRole::Primary,
+                               1, 16)
+                         .node("replica1", "localhost", "12432", "postgres", "postgres", "password",
+                               NodeRole::AsyncReplica, 2, 16)
+                         .primary_failover({"primary1", "replica1"})
+                         .default_consistency(Consistency::BoundedStaleness)
+                         .bounded_staleness(150ms, 0)
+                         .read_my_writes_ttl(500ms)
+                         .pool_limits(64, 16)
+                         .health(10000, 120, "SELECT 1")
+                         .build();
+
+    usub::uvent::system::co_spawn(router.start_health_loop());
+    co_await usub::uvent::system::this_coroutine::sleep_for(1500ms);
+
+    RouteHint read_hint{.kind = QueryKind::Read, .consistency = Consistency::Eventual};
+    if (auto* pool = router.route(read_hint))
+    {
+        auto res = co_await pool->query_awaitable("SELECT now()");
+        std::cout << (res.ok ? "read ok\n" : "read fail\n");
+    }
+
+    RouteHint write_hint{.kind = QueryKind::Write, .consistency = Consistency::Strong};
+    if (auto* pool = router.route(write_hint))
+    {
+        auto res = co_await pool->query_awaitable("INSERT INTO logs(ts) VALUES (now())");
+        std::cout << (res.ok ? "write ok\n" : "write fail\n");
+    }
+
+    co_return;
+}
+
 int main()
 {
     settings::timeout_duration_ms = 5000;
@@ -936,6 +988,7 @@ int main()
     system::co_spawn(test_array_inserts(pool));
     system::co_spawn(test_reflect_query(pool));
     system::co_spawn(tx_reflect_example(pool));
+    system::co_spawn(routing_example());
 
     uvent.run();
     return 0;

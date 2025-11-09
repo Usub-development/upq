@@ -1,4 +1,6 @@
+// PgRouting.cpp
 #include "upq/PgRouting.h"
+#include "uvent/Uvent.h"
 #include <algorithm>
 #include <chrono>
 
@@ -11,15 +13,32 @@ namespace usub::pg
         return (role == NodeRole::Analytics) ? lim.analytics_max_conns : lim.default_max_conns;
     }
 
+    bool PgConnector::is_replica(NodeRole r)
+    {
+        return r == NodeRole::SyncReplica || r == NodeRole::AsyncReplica || r == NodeRole::Analytics;
+    }
+
+    bool PgConnector::is_usable(NodeRole r)
+    {
+        return r != NodeRole::Archive && r != NodeRole::Maintenance;
+    }
+
     PgConnector::PgConnector(Config cfg) : cfg_(std::move(cfg))
     {
         this->nodes_.reserve(this->cfg_.nodes.size());
         for (const auto& ep : this->cfg_.nodes)
         {
-            auto pool = std::make_unique<PgPool>(
-                ep.host, ep.port, ep.user, ep.db, ep.password,
-                ep.max_pool ? ep.max_pool : pool_cap_for(ep.role, this->cfg_.limits)
-            );
+            std::unique_ptr<PgPool> pool;
+            try
+            {
+                pool = std::make_unique<PgPool>(
+                    ep.host, ep.port, ep.user, ep.db, ep.password,
+                    ep.max_pool ? ep.max_pool : pool_cap_for(ep.role, this->cfg_.limits)
+                );
+            }
+            catch (...)
+            {
+            }
             this->nodes_.push_back(Node{ep, std::move(pool), {}});
         }
         for (const auto& name : this->cfg_.primary_failover)
@@ -43,18 +62,33 @@ namespace usub::pg
         }
     }
 
+    bool PgConnector::ensure_pool(Node& n)
+    {
+        if (n.pool) return true;
+        try
+        {
+            const size_t cap = n.ep.max_pool ? n.ep.max_pool : pool_cap_for(n.ep.role, this->cfg_.limits);
+            n.pool = std::make_unique<PgPool>(n.ep.host, n.ep.port, n.ep.user, n.ep.db, n.ep.password, cap);
+            return true;
+        }
+        catch (...)
+        {
+            n.pool.reset();
+            return false;
+        }
+    }
+
     PgPool* PgConnector::route(const RouteHint& hint)
     {
         if (hint.kind == QueryKind::Write || hint.kind == QueryKind::DDL
             || hint.consistency == Consistency::Strong || hint.read_my_writes)
         {
-            auto* p = this->pick_primary();
-            return p ? p->pool.get() : nullptr;
+            if (auto* p = this->pick_primary()) if (this->ensure_pool(*p)) return p->pool.get();
+            return nullptr;
         }
-        auto* r = this->pick_best_replica(hint);
-        if (r) return r->pool.get();
-        auto* p = this->pick_primary();
-        return p ? p->pool.get() : nullptr;
+        if (auto* r = this->pick_best_replica(hint)) if (this->ensure_pool(*r)) return r->pool.get();
+        if (auto* p = this->pick_primary()) if (this->ensure_pool(*p)) return p->pool.get();
+        return nullptr;
     }
 
     PgPool* PgConnector::route_for_tx(const PgTransactionConfig& cfg_tx)
@@ -63,40 +97,33 @@ namespace usub::pg
             (cfg_tx.isolation == TxIsolationLevel::Serializable)
                 ? Consistency::Strong
                 : this->cfg_.routing.default_consistency;
-
         if (!cfg_tx.read_only || eff_consistency == Consistency::Strong)
         {
-            auto* p = this->pick_primary();
-            return p ? p->pool.get() : nullptr;
+            if (auto* p = this->pick_primary()) if (this->ensure_pool(*p)) return p->pool.get();
+            return nullptr;
         }
-
         if (cfg_tx.deferrable)
         {
             Node* best = nullptr;
             for (auto& n : this->nodes_)
             {
-                if (n.ep.role != NodeRole::SyncReplica ||
-                    !n.stats.healthy ||
-                    !this->is_usable(n.ep.role))
-                    continue;
-                if (!best || n.stats.replay_lag < best->stats.replay_lag)
-                    best = &n;
+                if (n.ep.role != NodeRole::SyncReplica || !this->is_usable(n.ep.role) || n.cb_state == 2) continue;
+                if (!n.pool || !n.stats.healthy) continue;
+                if (!best || n.stats.replay_lag < best->stats.replay_lag) best = &n;
             }
-            if (best) return best->pool.get();
-            auto* p = this->pick_primary();
-            return p ? p->pool.get() : nullptr;
+            if (best && this->ensure_pool(*best)) return best->pool.get();
+            if (auto* p = this->pick_primary()) if (this->ensure_pool(*p)) return p->pool.get();
+            return nullptr;
         }
-
         RouteHint rh{
             .kind = QueryKind::Read,
             .consistency = eff_consistency,
             .staleness = this->cfg_.routing.bounded_staleness,
             .read_my_writes = false
         };
-        if (auto* r = this->pick_best_replica(rh)) return r->pool.get();
-
-        auto* p = this->pick_primary();
-        return p ? p->pool.get() : nullptr;
+        if (auto* r = this->pick_best_replica(rh)) if (this->ensure_pool(*r)) return r->pool.get();
+        if (auto* p = this->pick_primary()) if (this->ensure_pool(*p)) return p->pool.get();
+        return nullptr;
     }
 
     PgConnector::Node* PgConnector::pick_primary()
@@ -104,11 +131,12 @@ namespace usub::pg
         for (auto idx : this->primary_failover_idx_)
         {
             auto& n = this->nodes_[idx];
-            if (n.ep.role == NodeRole::Primary && n.stats.healthy && n.cb_state != 2 && this->is_usable(n.ep.role))
+            if (n.ep.role == NodeRole::Primary && this->is_usable(n.ep.role) && n.cb_state != 2 && n.stats.healthy && n.
+                pool)
                 return &n;
         }
         for (auto& n : this->nodes_)
-            if (n.ep.role == NodeRole::Primary && n.cb_state != 2 && this->is_usable(n.ep.role))
+            if (n.ep.role == NodeRole::Primary && this->is_usable(n.ep.role) && n.cb_state != 2 && n.pool)
                 return &n;
         return nullptr;
     }
@@ -130,8 +158,8 @@ namespace usub::pg
         };
         for (auto& n : this->nodes_)
         {
-            if (!this->is_replica(n.ep.role) || !n.stats.healthy || n.cb_state == 2 || !this->is_usable(n.ep.role))
-                continue;
+            if (!this->is_replica(n.ep.role) || !this->is_usable(n.ep.role) || n.cb_state == 2) continue;
+            if (!n.pool || !n.stats.healthy) continue;
             if (!ok_stale(n)) continue;
             if (!best || better(&n, best)) best = &n;
         }
@@ -140,7 +168,11 @@ namespace usub::pg
 
     void PgConnector::apply_circuit_breaker(Node& n, bool ok)
     {
-        auto now = std::chrono::steady_clock::now();
+        using clock = std::chrono::steady_clock;
+        auto now = clock::now();
+        const auto quiet = std::chrono::milliseconds{this->cfg_.health.cb_quiet_ms};
+        const auto backoff = std::chrono::milliseconds{this->cfg_.health.cb_backoff_ms};
+        const auto maxb = std::chrono::milliseconds{this->cfg_.health.cb_max_ms};
         if (ok)
         {
             if (n.cb_state == 1 && now >= n.cb_until) n.cb_state = 0;
@@ -150,14 +182,14 @@ namespace usub::pg
         if (n.cb_state == 0)
         {
             n.cb_state = 2;
-            n.cb_until = now + milliseconds(500);
+            n.cb_until = now + quiet;
         }
         else if (n.cb_state == 1)
         {
             n.cb_state = 2;
-            n.cb_until = now + milliseconds(1000);
+            n.cb_until = now + backoff;
         }
-        else { n.cb_until = now + milliseconds(1500); }
+        else n.cb_until = now + maxb;
     }
 
     usub::uvent::task::Awaitable<bool> PgConnector::probe_healthy(PgPool& pool)
@@ -166,8 +198,7 @@ namespace usub::pg
         co_return qr.ok;
     }
 
-    usub::uvent::task::Awaitable<std::chrono::milliseconds>
-    PgConnector::probe_rtt(PgPool& pool, const std::string& sql)
+    usub::uvent::task::Awaitable<std::chrono::milliseconds> PgConnector::probe_rtt(PgPool& pool, const std::string& sql)
     {
         using clock = std::chrono::steady_clock;
         auto t0 = clock::now();
@@ -185,40 +216,53 @@ namespace usub::pg
           COALESCE( (EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())) * 1000)::bigint, 0 ) AS lag_ms,
           COALESCE( pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn())::bigint, 0 ) AS lsn_lag
     )SQL");
-        if (!opt.has_value())
-            co_return std::make_pair(milliseconds{0}, uint64_t{0});
+        if (!opt.has_value()) co_return std::make_pair(milliseconds{0}, uint64_t{0});
         co_return std::make_pair(milliseconds{opt->lag_ms}, static_cast<uint64_t>(opt->lsn_lag));
     }
 
     usub::uvent::task::Awaitable<void> PgConnector::health_tick()
     {
+        const auto lag_thr = std::chrono::milliseconds{this->cfg_.health.lag_threshold_ms};
         for (auto& n : this->nodes_)
         {
             if (!this->is_usable(n.ep.role)) continue;
-
+            if (!this->ensure_pool(n))
+            {
+                n.stats.healthy = false;
+                this->apply_circuit_breaker(n, false);
+                continue;
+            }
             bool ok = co_await this->probe_healthy(*n.pool);
             auto rtt = co_await this->probe_rtt(*n.pool, this->cfg_.health.rtt_probe_sql);
             auto [lag_ms, lsn_lag] = co_await this->probe_replication_lag(*n.pool);
-
             n.stats.healthy = ok;
             n.stats.rtt = rtt;
             n.stats.replay_lag = lag_ms;
             n.stats.lsn_lag = lsn_lag;
-
-            if (n.ep.role == NodeRole::Primary && n.stats.replay_lag.count() > 0)
-                n.stats.healthy = false;
-
+            if (n.stats.replay_lag > lag_thr) n.stats.healthy = false;
+            if (n.ep.role == NodeRole::Primary && n.stats.replay_lag.count() > 0) n.stats.healthy = false;
             this->apply_circuit_breaker(n, n.stats.healthy);
+            std::cout << "health tick" << std::endl;
         }
         co_return;
+    }
+
+    usub::uvent::task::Awaitable<void> PgConnector::start_health_loop()
+    {
+        auto iv = std::chrono::milliseconds{this->cfg_.health.interval_ms ? this->cfg_.health.interval_ms : 500};
+        while (true)
+        {
+            co_await this->health_tick();
+            co_await usub::uvent::system::this_coroutine::sleep_for(iv);
+        }
     }
 
     PgPool* PgConnector::pin(const std::string& node_name, const RouteHint&)
     {
         auto it = std::find_if(this->nodes_.begin(), this->nodes_.end(),
                                [&](const Node& n) { return n.ep.name == node_name; });
-        if (it == this->nodes_.end() || !it->stats.healthy || it->cb_state == 2 || !this->is_usable(it->ep.role))
-            return nullptr;
+        if (it == this->nodes_.end() || !this->is_usable(it->ep.role) || it->cb_state == 2) return nullptr;
+        if (!this->ensure_pool(*it) || !it->stats.healthy) return nullptr;
         return it->pool.get();
     }
 }
