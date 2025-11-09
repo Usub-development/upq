@@ -242,7 +242,6 @@ namespace usub::pg
             if (n.stats.replay_lag > lag_thr) n.stats.healthy = false;
             if (n.ep.role == NodeRole::Primary && n.stats.replay_lag.count() > 0) n.stats.healthy = false;
             this->apply_circuit_breaker(n, n.stats.healthy);
-            std::cout << "health tick" << std::endl;
         }
         co_return;
     }
