@@ -303,7 +303,7 @@ namespace usub::pg
                 {
                     out.reset();
                     return true;
-                } // NULL из драйвера
+                }
                 T v{};
                 if (Decoder<T>::apply(sv, v))
                 {
