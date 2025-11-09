@@ -464,7 +464,7 @@ usub::uvent::task::Awaitable<void> tx_reflect_example(usub::pg::PgPool& pool)
 
     {
         const char* timeout = "2s";
-        auto setr = co_await tx.query("SET LOCAL lock_timeout = $1", timeout);
+        auto setr = co_await tx.query("SELECT set_config('lock_timeout', $1, true);", timeout);
         if (!setr.ok) std::cout << "[SET LOCAL] " << setr.error << "\n";
     }
 
