@@ -456,78 +456,131 @@ usub::uvent::task::Awaitable<void> tx_reflect_example(usub::pg::PgPool& pool)
                 tags     TEXT[]      NOT NULL DEFAULT '{}'
             );
         )SQL");
-        if (!r.ok)
-        {
-            std::cout << "[SCHEMA] " << r.error << "\n";
-            co_return;
-        }
+        if (!r.ok) { std::cout << "[SCHEMA] " << r.error << "\n"; co_return; }
     }
 
     usub::pg::PgTransaction tx(&pool);
-    if (!(co_await tx.begin()))
-    {
-        std::cout << "[TX] begin failed\n";
-        co_return;
-    }
+    if (!(co_await tx.begin())) { std::cout << "[TX] begin failed\n"; co_return; }
 
     {
-        NewUser nu{
-            .name = "Kirill",
-            .password = std::nullopt,
-            .roles = {1, 2, 5},
-            .tags = {"cpp", "uvent", "reflect"}
-        };
-        auto r = co_await tx.query_reflect(
-            "INSERT INTO users_r(name,password,roles,tags) VALUES($1,$2,$3,$4)",
-            nu
-        );
-        if (!r.ok)
-        {
-            std::cout << "[INSERT] " << r.error << "\n";
-            co_await tx.rollback();
-            co_return;
-        }
-        std::cout << "[INSERT] affected=" << r.rows_affected << "\n";
+        const char* timeout = "2s";
+        auto setr = co_await tx.query("SET LOCAL lock_timeout = $1", timeout);
+        if (!setr.ok) std::cout << "[SET LOCAL] " << setr.error << "\n";
+    }
+
+    int64_t inserted_id_1 = 0;
+    {
+        NewUser nu;
+        nu.name = "Kirill";
+        nu.password = std::nullopt;
+        nu.roles = std::vector<int>{1, 2, 5};
+        nu.tags  = std::vector<std::string>{"cpp", "uvent", "reflect"};
+
+        auto ins = co_await tx.query_reflect(
+            "INSERT INTO users_r(name,password,roles,tags) VALUES($1,$2,$3,$4)", nu);
+        if (!ins.ok) { std::cout << "[INSERT] " << ins.error << "\n"; co_await tx.rollback(); co_return; }
+
+        auto ins_ret = co_await tx.select_one_reflect<Ret>(
+            "WITH ins AS (INSERT INTO users_r(name,password,roles,tags) VALUES($1,$2,$3,$4) RETURNING id, name) "
+            "SELECT id, name AS username FROM ins", nu);
+        if (ins_ret) { inserted_id_1 = ins_ret->id; std::cout << "[INSERT->RET] id=" << ins_ret->id << " user=" << ins_ret->username << "\n"; }
+    }
+
+    int64_t inserted_id_2 = 0;
+    {
+        std::string name2 = "Bob";
+        std::optional<std::string> pass2 = std::optional<std::string>("x");
+        std::vector<int> roles2; roles2.push_back(3); roles2.push_back(4);
+        std::vector<std::string> tags2; tags2.push_back("beta"); tags2.push_back("labs");
+        auto tup2 = std::make_tuple(name2, pass2, roles2, tags2);
+
+        auto ret = co_await tx.select_one_reflect<Ret>(
+            "WITH ins AS (INSERT INTO users_r(name,password,roles,tags) VALUES($1,$2,$3,$4) RETURNING id, name) "
+            "SELECT id, name AS username FROM ins", tup2);
+        if (ret) { inserted_id_2 = ret->id; std::cout << "[INSERT tuple->RET] id=" << ret->id << " user=" << ret->username << "\n"; }
     }
 
     {
         auto sub = tx.make_subtx();
         if (co_await sub.begin())
         {
-            UpdRoles u{.roles = {9, 9, 9}, .id = 1};
-            auto r = co_await sub.query_reflect(
-                "UPDATE users_r SET roles = $1 WHERE id = $2", u
-            );
-            if (!r.ok) { std::cout << "[SUBTX UPDATE] " << r.error << "\n"; }
-            std::cout << "[SUBTX UPDATE] affected=" << r.rows_affected << " (rollback)\n";
+            UpdRoles u;
+            u.roles = std::vector<int>{9, 9, 9};
+            u.id = inserted_id_1 > 0 ? inserted_id_1 : 1;
+
+            auto r = co_await sub.query_reflect("UPDATE users_r SET roles = $1 WHERE id = $2", u);
+            std::cout << "[SUBTX UPDATE] ok=" << r.ok << " affected=" << r.rows_affected << " (rollback)\n";
             co_await sub.rollback();
         }
     }
 
     {
+        auto sub = tx.make_subtx();
+        if (co_await sub.begin())
+        {
+            std::vector<std::string> tags_commit; tags_commit.push_back("committed"); tags_commit.push_back("subtx");
+            int64_t id2 = inserted_id_2 > 0 ? inserted_id_2 : 2;
+
+            auto r = co_await sub.query("UPDATE users_r SET tags = $1 WHERE id = $2 RETURNING id", tags_commit, id2);
+            bool ok = r.ok;
+            uint64_t aff = r.rows_affected;
+            bool committed = co_await sub.commit();
+            std::cout << "[SUBTX COMMIT] ok=" << ok << " affected=" << aff << " commit=" << committed << "\n";
+        }
+    }
+
+    {
+        int limit = 10, off = 0;
         auto rows = co_await tx.select_reflect<UserRow>(
-            "SELECT id, name AS username, password, roles, tags FROM users_r ORDER BY id LIMIT 10"
-        );
-        std::cout << "[SELECT]\n";
+            "SELECT id, name AS username, password, roles, tags FROM users_r ORDER BY id LIMIT $1 OFFSET $2",
+            limit, off);
+        std::cout << "[SELECT PAGE] n=" << rows.size() << "\n";
         for (auto& u : rows)
         {
-            std::cout << "  id=" << u.id
-                << " name=" << u.username
-                << " pwd=" << (u.password ? *u.password : "<NULL>")
-                << " roles=[";
-            for (size_t i = 0; i < u.roles.size(); ++i)
-                std::cout << u.roles[i] << (i + 1 < u.roles.size() ? "," : "");
+            std::cout << "  id=" << u.id << " name=" << u.username
+                      << " pwd=" << (u.password ? *u.password : "<NULL>") << " roles=[";
+            for (size_t i = 0; i < u.roles.size(); ++i) std::cout << u.roles[i] << (i + 1 < u.roles.size() ? "," : "");
             std::cout << "] tags=[";
-            for (size_t i = 0; i < u.tags.size(); ++i)
-                std::cout << u.tags[i] << (i + 1 < u.tags.size() ? "," : "");
+            for (size_t i = 0; i < u.tags.size(); ++i) std::cout << u.tags[i] << (i + 1 < u.tags.size() ? "," : "");
             std::cout << "]\n";
         }
     }
 
-    if (!(co_await tx.commit())) { std::cout << "[TX] commit failed\n"; }
+    {
+        std::optional<std::string> patt = std::string("%bo%");
+        std::optional<int64_t> min_id = int64_t{0};
+        auto rows = co_await tx.select_reflect<UserRow>(
+            "SELECT id, name AS username, password, roles, tags FROM users_r "
+            "WHERE ($1::text IS NULL OR name ILIKE $1) AND ($2::int8 IS NULL OR id >= $2) ORDER BY id",
+            patt, min_id);
+        std::cout << "[FILTERED] n=" << rows.size() << "\n";
+    }
+
+    {
+        Upd u;
+        u.name = "Kirill-upd";
+        u.id = inserted_id_1 > 0 ? inserted_id_1 : 1;
+        auto upd = co_await tx.query_reflect("UPDATE users_r SET name = $1 WHERE id = $2", u);
+        std::cout << "[TX UPDATE] ok=" << upd.ok << " affected=" << upd.rows_affected << "\n";
+
+        auto check = co_await tx.select_one_reflect<UserRow>(
+            "SELECT id, name AS username, password, roles, tags FROM users_r WHERE id = $1", u.id);
+        std::cout << "[TX CHECK] name=" << (check ? check->username : "<none>") << "\n";
+    }
+
+    {
+        std::vector<int64_t> ids;
+        if (inserted_id_1 > 0) ids.push_back(inserted_id_1);
+        if (inserted_id_2 > 0) ids.push_back(inserted_id_2);
+        auto rows = co_await tx.select_reflect<UserRow>(
+            "SELECT id, name AS username, password, roles, tags FROM users_r WHERE id = ANY($1::int8[]) ORDER BY id",
+            ids);
+        std::cout << "[ANY(ids)] n=" << rows.size() << "\n";
+    }
+
+    if (!(co_await tx.commit())) std::cout << "[TX] commit failed\n";
     co_return;
 }
-
 
 task::Awaitable<void> test_array_inserts(usub::pg::PgPool& pool)
 {

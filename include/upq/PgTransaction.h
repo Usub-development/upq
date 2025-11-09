@@ -7,6 +7,8 @@
 #include <utility>
 #include <cstdint>
 #include <atomic>
+#include <optional>
+#include <vector>
 
 #include "PgPool.h"
 #include "PgConnection.h"
@@ -34,11 +36,7 @@ namespace usub::pg
     class PgTransaction
     {
     public:
-        explicit PgTransaction(
-            PgPool* pool,
-            PgTransactionConfig cfg = {}
-        );
-
+        explicit PgTransaction(PgPool* pool, PgTransactionConfig cfg = {});
         ~PgTransaction();
 
         usub::uvent::task::Awaitable<bool> begin();
@@ -47,9 +45,9 @@ namespace usub::pg
         usub::uvent::task::Awaitable<QueryResult>
         query(const std::string& sql, Args&&... args);
 
-        template <class T>
+        template <class Obj>
         usub::uvent::task::Awaitable<QueryResult>
-        query_reflect(const std::string& sql, const T& obj)
+        query_reflect(const std::string& sql, const Obj& obj)
         {
             if (!active_ || !conn_ || !conn_->connected())
             {
@@ -61,6 +59,13 @@ namespace usub::pg
                 co_return bad;
             }
             co_return co_await conn_->exec_param_query_nonblocking(sql, obj);
+        }
+
+        template <class Obj>
+        usub::uvent::task::Awaitable<QueryResult>
+        exec_reflect(const std::string& sql, const Obj& obj)
+        {
+            co_return co_await query_reflect(sql, obj);
         }
 
         template <class T>
@@ -83,6 +88,28 @@ namespace usub::pg
             co_return co_await conn_->exec_simple_query_one_nonblocking<T>(sql);
         }
 
+        template <class T, typename... Args>
+        usub::uvent::task::Awaitable<std::vector<T>>
+        select_reflect(const std::string& sql, Args&&... args)
+        {
+            if (!active_ || !conn_ || !conn_->connected())
+                co_return std::vector<T>{};
+
+            co_return co_await conn_->exec_param_query_nonblocking<T>(
+                sql, std::forward<Args>(args)...);
+        }
+
+        template <class T, typename... Args>
+        usub::uvent::task::Awaitable<std::optional<T>>
+        select_one_reflect(const std::string& sql, Args&&... args)
+        {
+            if (!active_ || !conn_ || !conn_->connected())
+                co_return std::optional<T>{};
+
+            co_return co_await conn_->exec_param_query_one_nonblocking<T>(
+                sql, std::forward<Args>(args)...);
+        }
+
         usub::uvent::task::Awaitable<bool> commit();
         usub::uvent::task::Awaitable<void> rollback();
         usub::uvent::task::Awaitable<void> finish();
@@ -95,9 +122,7 @@ namespace usub::pg
         class PgSubtransaction
         {
         public:
-            PgSubtransaction(PgTransaction& parent,
-                             std::string savepoint_name);
-
+            PgSubtransaction(PgTransaction& parent, std::string savepoint_name);
             ~PgSubtransaction();
 
             usub::uvent::task::Awaitable<bool> begin();
@@ -115,39 +140,59 @@ namespace usub::pg
                 co_return co_await parent_.query(sql, std::forward<Args>(args)...);
             }
 
-            // --- рефлексия в сабтранзакции ---
-            template <class T>
+            template <class Obj>
             usub::uvent::task::Awaitable<QueryResult>
-            query_reflect(const std::string& sql, const T& obj)
+            query_reflect(const std::string& sql, const Obj& obj)
             {
                 co_return co_await parent_.query_reflect(sql, obj);
+            }
+
+            template <class Obj>
+            usub::uvent::task::Awaitable<QueryResult>
+            exec_reflect(const std::string& sql, const Obj& obj)
+            {
+                co_return co_await parent_.exec_reflect(sql, obj);
             }
 
             template <class T>
             usub::uvent::task::Awaitable<std::vector<T>>
             select_reflect(const std::string& sql)
             {
-                co_return co_await parent_.select_reflect<T>(sql);
+                co_return co_await parent_.template select_reflect<T>(sql);
             }
 
             template <class T>
             usub::uvent::task::Awaitable<std::optional<T>>
             select_one_reflect(const std::string& sql)
             {
-                co_return co_await parent_.select_one_reflect<T>(sql);
+                co_return co_await parent_.template select_one_reflect<T>(sql);
+            }
+
+            template <class T, typename... Args>
+            usub::uvent::task::Awaitable<std::vector<T>>
+            select_reflect(const std::string& sql, Args&&... args)
+            {
+                co_return co_await parent_.template select_reflect<T>(
+                    sql, std::forward<Args>(args)...);
+            }
+
+            template <class T, typename... Args>
+            usub::uvent::task::Awaitable<std::optional<T>>
+            select_one_reflect(const std::string& sql, Args&&... args)
+            {
+                co_return co_await parent_.template select_one_reflect<T>(
+                    sql, std::forward<Args>(args)...);
             }
 
         private:
             PgTransaction& parent_;
             std::string sp_name_;
-
             bool active_{false};
             bool committed_{false};
             bool rolled_back_{false};
         };
 
         PgSubtransaction make_subtx();
-
         std::shared_ptr<PgConnectionLibpq> connection() const { return conn_; }
 
     private:
@@ -203,7 +248,6 @@ namespace usub::pg
 
         co_return qr;
     }
-
 } // namespace usub::pg
 
 #endif // PGTRANSACTION_H
