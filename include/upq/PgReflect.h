@@ -11,6 +11,7 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+#include <array>
 #include <sstream>
 #include <cstdio>
 #include <ios>
@@ -58,14 +59,8 @@ namespace usub::pg
             for (char ch : in)
             {
                 unsigned char c = static_cast<unsigned char>(ch);
-                if (std::isalnum(c))
-                {
-                    s.push_back(static_cast<char>(std::tolower(c)));
-                }
-                else if (ch == '_')
-                {
-                    s.push_back('_');
-                }
+                if (std::isalnum(c)) s.push_back(static_cast<char>(std::tolower(c)));
+                else if (ch == '_') s.push_back('_');
             }
             std::string out;
             out.reserve(s.size());
@@ -236,6 +231,24 @@ namespace usub::pg
         {
         };
 
+        inline std::string preview(std::string_view sv, size_t limit = 80)
+        {
+            if (sv.size() <= limit) return std::string(sv);
+            std::string s;
+            s.reserve(limit + 3);
+            s.append(sv.data(), limit);
+            s += "...";
+            return s;
+        }
+
+        template <class T>
+        inline std::string type_name_short()
+        {
+            std::string s{std::string(ureflect::type_name<T>())};
+            auto pos = s.rfind("::");
+            return (pos == std::string::npos) ? s : s.substr(pos + 2);
+        }
+
         template <class T, class Enable = void>
         struct Decoder
         {
@@ -290,7 +303,7 @@ namespace usub::pg
                 {
                     out.reset();
                     return true;
-                }
+                } // NULL из драйвера
                 T v{};
                 if (Decoder<T>::apply(sv, v))
                 {
@@ -368,11 +381,20 @@ namespace usub::pg
         template <class T>
         struct Decoder<T, std::enable_if_t<ReflectAggregate<T>>>
         {
-            static bool apply(std::string_view, T&)
-            {
-                return false;
-            }
+            static bool apply(std::string_view, T&) { return false; }
         };
+
+        template <class T>
+        inline bool decode_or_err(std::string_view sv, T& out, std::string* err, std::string_view ctx)
+        {
+            if (Decoder<T>::apply(sv, out)) return true;
+            if (err)
+            {
+                *err = "decode failed: ctx=[" + std::string(ctx) + "], expected=[" +
+                    type_name_short<T>() + "], value=[" + preview(sv) + "]";
+            }
+            return false;
+        }
 
         template <class Tuple>
             requires is_tuple_like_v<Tuple>
@@ -382,7 +404,9 @@ namespace usub::pg
             constexpr std::size_t N = std::tuple_size_v<Tup>;
             if (row.cols.size() < N)
             {
-                if (err) *err = "not enough columns";
+                if (err)
+                    *err = "not enough columns: expected=" + std::to_string(N) +
+                        ", got=" + std::to_string(row.cols.size());
                 return false;
             }
 
@@ -394,10 +418,16 @@ namespace usub::pg
                     using Elem = std::tuple_element_t<I, Tup>;
                     const auto& sv = row.cols[I];
                     Elem tmp{};
-                    if (!Decoder<Elem>::apply(std::string_view(sv.data(), sv.size()), tmp))
+                    if (!decode_or_err<Elem>(std::string_view(sv.data(), sv.size()),
+                                             tmp, err,
+                                             "tuple field #" + std::to_string(I)))
+                    {
                         ok = false;
+                    }
                     else
+                    {
                         std::get<I>(dst) = std::move(tmp);
+                    }
                 }(), ... );
             }(std::make_index_sequence<N>{});
             if (!ok && err && err->empty()) *err = "failed to decode tuple element";
@@ -412,7 +442,9 @@ namespace usub::pg
             constexpr std::size_t N = ureflect::count_members<V>;
             if (row.cols.size() < N)
             {
-                if (err) *err = "not enough columns";
+                if (err)
+                    *err = "not enough columns: expected=" + std::to_string(N) +
+                        ", got=" + std::to_string(row.cols.size());
                 return false;
             }
 
@@ -425,13 +457,19 @@ namespace usub::pg
                     using FieldT = std::remove_reference_t<decltype(ureflect::get<I>(tie))>;
                     const auto& sv = row.cols[I];
                     FieldT tmp{};
-                    if (!Decoder<FieldT>::apply(std::string_view(sv.data(), sv.size()), tmp))
+                    if (!decode_or_err<FieldT>(std::string_view(sv.data(), sv.size()),
+                                               tmp, err,
+                                               "aggregate field #" + std::to_string(I)))
+                    {
                         ok = false;
+                    }
                     else
+                    {
                         ureflect::get<I>(tie) = std::move(tmp);
+                    }
                 }(), ... );
             }(std::make_index_sequence<N>{});
-            if (!ok && err && err->empty()) *err = "failed to decode aggregate field";
+            if (!ok && err && err->empty()) *err = "failed to decode aggregate field (positional)";
             return ok;
         }
 
@@ -451,7 +489,9 @@ namespace usub::pg
 
             if (row_index >= qr.rows.size())
             {
-                if (err) *err = "row out of range";
+                if (err)
+                    *err = "row out of range: row=" + std::to_string(row_index) +
+                        ", total_rows=" + std::to_string(qr.rows.size());
                 return false;
             }
             const auto& row = qr.rows[row_index];
@@ -492,24 +532,29 @@ namespace usub::pg
 
             int col_map[N];
             bool all_found = true;
+            std::vector<std::string> missing;
 
             [&]<std::size_t... I>(std::index_sequence<I...>)
             {
                 (([&]
                 {
                     const int idx = find_col_idx(norm_cols, norm_fields[I]);
-#if UPQ_REFLECT_DEBUG
-                    UPQ_LOG("[UPQ/reflect] map field '%s' -> col %d",
-                            norm_fields[I].c_str(), idx);
-#endif
                     col_map[I] = idx;
-                    if (idx < 0) all_found = false;
+                    if (idx < 0)
+                    {
+                        all_found = false;
+                        missing.emplace_back(norm_fields[I]);
+                    }
                 }()), ...);
             }(std::make_index_sequence<N>{});
 
             if (!all_found)
             {
-                if (err) *err = "not all fields matched by name";
+                if (err)
+                {
+                    *err = "not all fields matched by name: missing=[" + join_csv(missing) +
+                        "], available_cols=[" + join_csv(qr.columns) + "]";
+                }
                 return false;
             }
 
@@ -523,10 +568,17 @@ namespace usub::pg
                     const int c = col_map[I];
                     const auto& sv = row.cols[static_cast<size_t>(c)];
                     FieldT tmp{};
-                    if (!Decoder<FieldT>::apply(std::string_view(sv.data(), sv.size()), tmp))
+                    std::string ctx = "field='" + std::string(fnames[I]) +
+                        "', column='" + qr.columns[static_cast<size_t>(c)] + "'";
+                    if (!decode_or_err<FieldT>(std::string_view(sv.data(), sv.size()),
+                                               tmp, err, ctx))
+                    {
                         ok = false;
+                    }
                     else
+                    {
                         ureflect::get<I>(tie) = std::move(tmp);
+                    }
                 }(), ... );
             }(std::make_index_sequence<N>{});
 
@@ -538,32 +590,42 @@ namespace usub::pg
     template <class T>
     inline bool map_row_reflect_positional(const QueryResult::Row& row, T& out, std::string* err = nullptr)
     {
-        if constexpr (detail::is_tuple_like_v<T>)
-            return detail::fill_from_row_positional(row, out, err);
-        else
-            return detail::fill_from_row_positional(row, out, err);
+        std::string local;
+        std::string* perr = err ? err : &local;
+        return detail::is_tuple_like_v<T>
+                   ? detail::fill_from_row_positional(row, out, perr)
+                   : detail::fill_from_row_positional(row, out, perr);
     }
 
     template <class T>
     inline T map_single_reflect_positional(const QueryResult& qr, size_t row = 0, std::string* err = nullptr)
     {
         if (row >= qr.rows.size()) throw std::out_of_range("row index out of range");
+        std::string local;
+        std::string* perr = err ? err : &local;
         T dst{};
-        if (!map_row_reflect_positional(qr.rows[row], dst, err))
-            throw std::runtime_error(err && !err->empty() ? *err : "decode failed");
+        if (!map_row_reflect_positional(qr.rows[row], dst, perr))
+            throw std::runtime_error(!perr->empty() ? *perr : "decode failed");
         return dst;
     }
 
     template <class T>
     inline std::vector<T> map_all_reflect_positional(const QueryResult& qr, std::string* err = nullptr)
     {
+        std::string local;
+        std::string* perr = err ? err : &local;
+
         std::vector<T> out;
         out.reserve(qr.rows.size());
-        for (const auto& r : qr.rows)
+        for (size_t i = 0; i < qr.rows.size(); ++i)
         {
             T dst{};
-            if (!map_row_reflect_positional(r, dst, err))
-                throw std::runtime_error(err && !err->empty() ? *err : "decode failed");
+            if (!map_row_reflect_positional(qr.rows[i], dst, perr))
+            {
+                if (perr->empty()) *perr = "decode failed";
+                *perr = "row=" + std::to_string(i) + ": " + *perr;
+                throw std::runtime_error(*perr);
+            }
             out.emplace_back(std::move(dst));
         }
         return out;
@@ -573,7 +635,9 @@ namespace usub::pg
         requires detail::ReflectAggregate<T>
     inline bool map_row_reflect_named(const QueryResult& qr, size_t row_index, T& out, std::string* err = nullptr)
     {
-        return detail::fill_from_row_named(qr, row_index, out, err);
+        std::string local;
+        std::string* perr = err ? err : &local;
+        return detail::fill_from_row_named(qr, row_index, out, perr);
     }
 
     template <class T>
@@ -581,9 +645,11 @@ namespace usub::pg
     inline T map_single_reflect_named(const QueryResult& qr, size_t row = 0, std::string* err = nullptr)
     {
         if (row >= qr.rows.size()) throw std::out_of_range("row index out of range");
+        std::string local;
+        std::string* perr = err ? err : &local;
         T dst{};
-        if (!map_row_reflect_named(qr, row, dst, err))
-            throw std::runtime_error(err && !err->empty() ? *err : "decode failed");
+        if (!map_row_reflect_named(qr, row, dst, perr))
+            throw std::runtime_error(!perr->empty() ? *perr : "decode failed");
         return dst;
     }
 
@@ -591,13 +657,20 @@ namespace usub::pg
         requires detail::ReflectAggregate<T>
     inline std::vector<T> map_all_reflect_named(const QueryResult& qr, std::string* err = nullptr)
     {
+        std::string local;
+        std::string* perr = err ? err : &local;
+
         std::vector<T> out;
         out.reserve(qr.rows.size());
         for (size_t i = 0; i < qr.rows.size(); ++i)
         {
             T dst{};
-            if (!map_row_reflect_named(qr, i, dst, err))
-                throw std::runtime_error(err && !err->empty() ? *err : "decode failed");
+            if (!map_row_reflect_named(qr, i, dst, perr))
+            {
+                if (perr->empty()) *perr = "decode failed";
+                *perr = "row=" + std::to_string(i) + ": " + *perr;
+                throw std::runtime_error(*perr);
+            }
             out.emplace_back(std::move(dst));
         }
         return out;

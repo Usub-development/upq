@@ -1011,6 +1011,42 @@ usub::uvent::task::Awaitable<void> routing_example()
 
     co_return;
 }
+struct UserErrorRow {
+    int id;
+    std::string name;
+    double balance;
+};
+
+usub::uvent::task::Awaitable<void> decode_fail_example(usub::pg::PgPool& pool)
+{
+    {
+        auto r = co_await pool.query_awaitable(R"SQL(
+            DROP TABLE IF EXISTS users_r;
+            CREATE TABLE users_r (
+                id       BIGSERIAL PRIMARY KEY,
+                name     TEXT,
+                balance  TEXT    -- важно: TEXT, чтобы decode сломался
+            );
+        )SQL");
+        if (!r.ok) co_return;
+    }
+
+    {
+        auto ins = co_await pool.query_awaitable(
+            "INSERT INTO users_r(name,balance) VALUES('Alice','not_a_number')");
+        if (!ins.ok) std::cout << "[INSERT ERROR] " << ins.error << "\n";
+    }
+
+    try {
+        auto rows = co_await pool.query_reflect<UserErrorRow>(
+            "SELECT id, name, balance FROM users_r");
+        std::cout << "[ROWS] n=" << rows.size() << "\n";
+    } catch (const std::exception& ex) {
+        std::cerr << "!!! Decode error caught: " << ex.what() << "\n";
+    }
+
+    co_return;
+}
 
 int main()
 {
@@ -1042,6 +1078,7 @@ int main()
     system::co_spawn(test_reflect_query(pool));
     system::co_spawn(tx_reflect_example(pool));
     system::co_spawn(routing_example());
+    system::co_spawn(decode_fail_example(pool));
 
     uvent.run();
     return 0;
