@@ -70,44 +70,68 @@ namespace usub::pg
 
         template <class T>
         usub::uvent::task::Awaitable<std::vector<T>>
-        select_reflect(const std::string& sql)
+        query_reflect(const std::string& sql)
         {
             if (!active_ || !conn_ || !conn_->connected())
                 co_return std::vector<T>{};
-
             co_return co_await conn_->exec_simple_query_nonblocking<T>(sql);
         }
 
         template <class T>
         usub::uvent::task::Awaitable<std::optional<T>>
-        select_one_reflect(const std::string& sql)
+        query_reflect_one(const std::string& sql)
         {
             if (!active_ || !conn_ || !conn_->connected())
                 co_return std::optional<T>{};
-
             co_return co_await conn_->exec_simple_query_one_nonblocking<T>(sql);
         }
 
         template <class T, typename... Args>
         usub::uvent::task::Awaitable<std::vector<T>>
-        select_reflect(const std::string& sql, Args&&... args)
+        query_reflect(const std::string& sql, Args&&... args)
         {
             if (!active_ || !conn_ || !conn_->connected())
                 co_return std::vector<T>{};
-
             co_return co_await conn_->exec_param_query_nonblocking<T>(
                 sql, std::forward<Args>(args)...);
         }
 
         template <class T, typename... Args>
         usub::uvent::task::Awaitable<std::optional<T>>
-        select_one_reflect(const std::string& sql, Args&&... args)
+        query_reflect_one(const std::string& sql, Args&&... args)
         {
             if (!active_ || !conn_ || !conn_->connected())
                 co_return std::optional<T>{};
-
             co_return co_await conn_->exec_param_query_one_nonblocking<T>(
                 sql, std::forward<Args>(args)...);
+        }
+
+        template <class T>
+        usub::uvent::task::Awaitable<std::vector<T>>
+        select_reflect(const std::string& sql)
+        {
+            co_return co_await query_reflect<T>(sql);
+        }
+
+        template <class T>
+        usub::uvent::task::Awaitable<std::optional<T>>
+        select_one_reflect(const std::string& sql)
+        {
+            co_return co_await query_reflect_one<T>(sql);
+        }
+
+        template <class T, typename... Args>
+        usub::uvent::task::Awaitable<std::vector<T>>
+        select_reflect(const std::string& sql, Args&&... args)
+        {
+            co_return co_await query_reflect<T>(sql, std::forward<Args>(args)...);
+        }
+
+        template <class T, typename... Args>
+        usub::uvent::task::Awaitable<std::optional<T>>
+        select_one_reflect(const std::string& sql, Args&&... args)
+        {
+            co_return co_await query_reflect_one<T>(sql, std::forward<Args>(args)...);
         }
 
         usub::uvent::task::Awaitable<bool> commit();
@@ -152,6 +176,36 @@ namespace usub::pg
             exec_reflect(const std::string& sql, const Obj& obj)
             {
                 co_return co_await parent_.exec_reflect(sql, obj);
+            }
+
+            template <class T>
+            usub::uvent::task::Awaitable<std::vector<T>>
+            query_reflect(const std::string& sql)
+            {
+                co_return co_await parent_.template query_reflect<T>(sql);
+            }
+
+            template <class T>
+            usub::uvent::task::Awaitable<std::optional<T>>
+            query_reflect_one(const std::string& sql)
+            {
+                co_return co_await parent_.template query_reflect_one<T>(sql);
+            }
+
+            template <class T, typename... Args>
+            usub::uvent::task::Awaitable<std::vector<T>>
+            query_reflect(const std::string& sql, Args&&... args)
+            {
+                co_return co_await parent_.template query_reflect<T>(
+                    sql, std::forward<Args>(args)...);
+            }
+
+            template <class T, typename... Args>
+            usub::uvent::task::Awaitable<std::optional<T>>
+            query_reflect_one(const std::string& sql, Args&&... args)
+            {
+                co_return co_await parent_.template query_reflect_one<T>(
+                    sql, std::forward<Args>(args)...);
             }
 
             template <class T>
