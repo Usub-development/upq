@@ -132,6 +132,21 @@ namespace usub::pg
 
             [[nodiscard]] inline size_t size() const noexcept { return this->cols.size(); }
             [[nodiscard]] inline bool empty() const noexcept { return this->cols.empty(); }
+
+            using iterator = std::vector<std::string>::iterator;
+            using const_iterator = std::vector<std::string>::const_iterator;
+
+            iterator begin() noexcept { return this->cols.begin(); }
+
+            iterator end() noexcept { return this->cols.end(); }
+
+            const_iterator begin() const noexcept { return this->cols.begin(); }
+
+            const_iterator end() const noexcept { return this->cols.end(); }
+
+            const_iterator cbegin() const noexcept { return this->cols.cbegin(); }
+
+            const_iterator cend() const noexcept { return this->cols.cend(); }
         };
 
         std::vector<std::string> columns;
@@ -177,6 +192,21 @@ namespace usub::pg
         {
             return this->rows.empty() || !this->rows[0].cols.empty();
         }
+
+        using iterator = std::vector<Row>::iterator;
+        using const_iterator = std::vector<Row>::const_iterator;
+
+        iterator begin() noexcept { return this->rows.begin(); }
+
+        iterator end() noexcept { return this->rows.end(); }
+
+        const_iterator begin() const noexcept { return this->rows.begin(); }
+
+        const_iterator end() const noexcept { return this->rows.end(); }
+
+        const_iterator cbegin() const noexcept { return this->rows.cbegin(); }
+
+        const_iterator cend() const noexcept { return this->rows.cend(); }
     };
 
     class QueryState : public utils::sync::refc::RefCounted<QueryState>
