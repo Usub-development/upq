@@ -17,9 +17,12 @@ namespace usub::pg
 
         switch (cfg.isolation)
         {
-        case TxIsolationLevel::ReadCommitted:   out += " ISOLATION LEVEL READ COMMITTED";   break;
-        case TxIsolationLevel::RepeatableRead:  out += " ISOLATION LEVEL REPEATABLE READ";  break;
-        case TxIsolationLevel::Serializable:    out += " ISOLATION LEVEL SERIALIZABLE";     break;
+        case TxIsolationLevel::ReadCommitted: out += " ISOLATION LEVEL READ COMMITTED";
+            break;
+        case TxIsolationLevel::RepeatableRead: out += " ISOLATION LEVEL REPEATABLE READ";
+            break;
+        case TxIsolationLevel::Serializable: out += " ISOLATION LEVEL SERIALIZABLE";
+            break;
         case TxIsolationLevel::Default: default: break;
         }
 
@@ -29,9 +32,13 @@ namespace usub::pg
     }
 
     PgTransaction::PgTransaction(PgPool* pool, PgTransactionConfig cfg)
-        : pool_(pool), cfg_(cfg) {}
+        : pool_(pool), cfg_(cfg)
+    {
+    }
 
-    PgTransaction::~PgTransaction() {}
+    PgTransaction::~PgTransaction()
+    {
+    }
 
     usub::uvent::task::Awaitable<bool> PgTransaction::begin()
     {
@@ -50,11 +57,15 @@ namespace usub::pg
         {
             co_await pool_->release_connection_async(conn_);
             conn_.reset();
-            active_ = false; committed_ = false; rolled_back_ = false;
+            active_ = false;
+            committed_ = false;
+            rolled_back_ = false;
             co_return false;
         }
 
-        active_ = true; committed_ = false; rolled_back_ = false;
+        active_ = true;
+        committed_ = false;
+        rolled_back_ = false;
         co_return true;
     }
 
@@ -64,21 +75,31 @@ namespace usub::pg
 
         if (!conn_ || !conn_->connected())
         {
-            committed_ = false; rolled_back_ = true; active_ = false;
-            if (conn_) { co_await pool_->release_connection_async(conn_); conn_.reset(); }
+            committed_ = false;
+            rolled_back_ = true;
+            active_ = false;
+            if (conn_)
+            {
+                co_await pool_->release_connection_async(conn_);
+                conn_.reset();
+            }
             co_return false;
         }
 
         QueryResult r_commit = co_await pool_->query_on(conn_, "COMMIT");
         if (!r_commit.ok)
         {
-            committed_ = false; rolled_back_ = true; active_ = false;
+            committed_ = false;
+            rolled_back_ = true;
+            active_ = false;
             co_await pool_->release_connection_async(conn_);
             conn_.reset();
             co_return false;
         }
 
-        committed_ = true; rolled_back_ = false; active_ = false;
+        committed_ = true;
+        rolled_back_ = false;
+        active_ = false;
         co_await pool_->release_connection_async(conn_);
         conn_.reset();
         co_return true;
@@ -94,8 +115,14 @@ namespace usub::pg
             (void)r_rb;
         }
 
-        committed_ = false; rolled_back_ = true; active_ = false;
-        if (conn_) { co_await pool_->release_connection_async(conn_); conn_.reset(); }
+        committed_ = false;
+        rolled_back_ = true;
+        active_ = false;
+        if (conn_)
+        {
+            co_await pool_->release_connection_async(conn_);
+            conn_.reset();
+        }
         co_return;
     }
 
@@ -103,7 +130,11 @@ namespace usub::pg
     {
         if (!active_)
         {
-            if (conn_) { co_await pool_->release_connection_async(conn_); conn_.reset(); }
+            if (conn_)
+            {
+                co_await pool_->release_connection_async(conn_);
+                conn_.reset();
+            }
             co_return;
         }
         co_await rollback();
@@ -120,8 +151,14 @@ namespace usub::pg
             (void)r_rb;
         }
 
-        committed_ = false; rolled_back_ = true; active_ = false;
-        if (conn_) { co_await pool_->release_connection_async(conn_); conn_.reset(); }
+        committed_ = false;
+        rolled_back_ = true;
+        active_ = false;
+        if (conn_)
+        {
+            co_await pool_->release_connection_async(conn_);
+            conn_.reset();
+        }
         co_return;
     }
 
@@ -144,9 +181,13 @@ namespace usub::pg
     PgTransaction::PgSubtransaction::PgSubtransaction(
         PgTransaction& parent,
         std::string savepoint_name)
-        : parent_(parent), sp_name_(std::move(savepoint_name)) {}
+        : parent_(parent), sp_name_(std::move(savepoint_name))
+    {
+    }
 
-    PgTransaction::PgSubtransaction::~PgSubtransaction() {}
+    PgTransaction::PgSubtransaction::~PgSubtransaction()
+    {
+    }
 
     usub::uvent::task::Awaitable<bool>
     PgTransaction::PgSubtransaction::begin()
@@ -157,7 +198,9 @@ namespace usub::pg
         QueryResult r = co_await parent_.pool_->query_on(parent_.conn_, cmd);
         if (!r.ok) co_return false;
 
-        active_ = true; committed_ = false; rolled_back_ = false;
+        active_ = true;
+        committed_ = false;
+        rolled_back_ = false;
         co_return true;
     }
 
@@ -168,7 +211,9 @@ namespace usub::pg
 
         if (!parent_.conn_ || !parent_.conn_->connected())
         {
-            active_ = false; committed_ = false; rolled_back_ = true;
+            active_ = false;
+            committed_ = false;
+            rolled_back_ = true;
             co_return false;
         }
 
@@ -176,11 +221,15 @@ namespace usub::pg
         QueryResult r = co_await parent_.pool_->query_on(parent_.conn_, cmd);
         if (!r.ok)
         {
-            active_ = false; committed_ = false; rolled_back_ = true;
+            active_ = false;
+            committed_ = false;
+            rolled_back_ = true;
             co_return false;
         }
 
-        active_ = false; committed_ = true; rolled_back_ = false;
+        active_ = false;
+        committed_ = true;
+        rolled_back_ = false;
         co_return true;
     }
 
@@ -196,7 +245,9 @@ namespace usub::pg
             (void)r;
         }
 
-        active_ = false; committed_ = false; rolled_back_ = true;
+        active_ = false;
+        committed_ = false;
+        rolled_back_ = true;
         co_return;
     }
 } // namespace usub::pg

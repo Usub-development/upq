@@ -2,70 +2,27 @@
 
 `PgTransaction` provides coroutine-safe transactional operations for PostgreSQL using a dedicated pooled connection.
 
-It wraps `BEGIN` / `COMMIT` / `ROLLBACK`, automatically manages connection reuse, supports nested subtransactions
-(`SAVEPOINT`), and integrates reflection-based parameter/result mapping.
+Wraps `BEGIN` / `COMMIT` / `ROLLBACK`, manages connection reuse, supports subtransactions (`SAVEPOINT`), and integrates
+reflection-based mapping.
 
 ---
 
 ## Overview
 
-- Uses a **dedicated connection** from `PgPool`
-- Configurable isolation / read-only / deferrable modes
-- Executes async queries on the same pinned connection
-- Commits or rolls back explicitly
-- Automatically returns or retires connection after use
-- Supports **subtransactions** via `SAVEPOINT`
-- Supports **pipelined execution** via compile-time flag
-- **Reflect-aware helpers** for SELECT and parameter binding
+- Dedicated connection from `PgPool`
+- Configurable isolation / read-only / deferrable
+- Async queries on the same pinned connection
+- Subtransactions via `SAVEPOINT`
+- Reflect-aware helpers
+    - **Preferred**: `query_reflect_expected*` / aliases `select*_expected`
+    - **Deprecated**: `query_reflect*` / `select_reflect*`
+- Optional pipeline mode (compile-time flag)
 
-All methods are coroutine-awaitable (`Awaitable`).
-
----
-
-## Example
-
-```cpp
-task::Awaitable<void> transfer_example()
-{
-    usub::pg::PgTransaction txn;
-
-    if (!co_await txn.begin())
-    {
-        std::cout << "[ERROR] BEGIN failed\n";
-        co_return;
-    }
-
-    auto r1 = co_await txn.query(
-        "UPDATE accounts SET balance = balance - $1 WHERE id = $2 RETURNING balance;",
-        100, 1
-    );
-
-    auto r2 = co_await txn.query(
-        "UPDATE accounts SET balance = balance + $1 WHERE id = $2 RETURNING balance;",
-        100, 2
-    );
-
-    if (!r1.ok || !r2.ok)
-    {
-        co_await txn.rollback();
-        co_return;
-    }
-
-    if (!co_await txn.commit())
-    {
-        std::cout << "[ERROR] COMMIT failed\n";
-        co_return;
-    }
-
-    std::cout << "[OK] transfer complete\n";
-}
-```
+All methods are coroutine-awaitable.
 
 ---
 
 ## Configuration
-
-Use `PgTransactionConfig` to control isolation and access mode:
 
 ```cpp
 usub::pg::PgTransactionConfig cfg{
@@ -74,179 +31,96 @@ usub::pg::PgTransactionConfig cfg{
     .deferrable = false
 };
 
-usub::pg::PgTransaction txn(&usub::pg::PgPool::instance(), cfg);
+usub::pg::PgTransaction txn(&pool, cfg);
 co_await txn.begin();
 ```
 
-Generated SQL:
+Generated SQL example:
 
 ```
 BEGIN ISOLATION LEVEL SERIALIZABLE READ WRITE;
 ```
 
-Other examples:
-
-```
-BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY DEFERRABLE;
-```
-
-Supported isolation levels: `READ COMMITTED`, `REPEATABLE READ`, `SERIALIZABLE`.
-
 ---
 
 ## Executing queries
 
-All queries run on the pinned connection:
-
 ```cpp
-auto qr = co_await txn.query(
+auto r = co_await txn.query(
     "INSERT INTO logs(message) VALUES($1) RETURNING id;",
     "started"
 );
-if (!qr.ok)
-{
-    std::cout << "insert failed: " << qr.error << "\n";
+if (!r.ok) {
+    // r.error, r.err_detail.sqlstate
     co_await txn.rollback();
 }
 ```
 
 ---
 
-## Reflect-based queries
+## Reflect-based queries (error-aware, **preferred**)
 
-Reflection enables automatic struct/tuple expansion for parameters and decoding of results into C++ aggregates.
-
-### SELECT → `std::vector<T>` / `std::optional<T>`
+Return via `std::expected`.
 
 ```cpp
-struct UserRow
-{
-    int64_t id;
-    std::string username;                   // maps from "name AS username"
-    std::optional<std::string> password;
-    std::vector<int> roles;
-    std::vector<std::string> tags;
-};
+struct Row { int64_t id; std::string username; };
 
-auto many = co_await txn.query_reflect<UserRow>(
-    "SELECT id, name AS username, password, roles, tags FROM users ORDER BY id;"
-);
+auto list = co_await txn.query_reflect_expected<Row>(
+    "SELECT id, name AS username FROM users ORDER BY id");
+if (!list) {
+    const auto& e = list.error();
+    // e.code, e.error, e.err_detail.sqlstate
+}
 
-auto one = co_await txn.query_reflect_one<UserRow>(
-    "SELECT id, name AS username, password, roles, tags FROM users WHERE id = $1;",
-    1
-);
+auto one = co_await txn.query_reflect_expected_one<Row>(
+    "SELECT id, name AS username FROM users WHERE id=$1", 1);
+if (!one) {
+    // e.error == "no rows" если SELECT ничего не вернул
+}
 ```
 
-### Aggregates or tuples → parameters (`INSERT/UPDATE`)
+Aliases:
 
 ```cpp
-struct NewUser
-{
-    std::string name;
-    std::optional<std::string> password;
-    std::vector<int> roles;
-    std::vector<std::string> tags;
-};
+auto list2 = co_await txn.select_reflect_expected<Row>(
+    "SELECT id, name AS username FROM users ORDER BY id");
 
-NewUser nu{ "bob", std::nullopt, {1, 2}, {"vip"} };
-
-auto ins = co_await txn.exec_reflect(
-    "INSERT INTO users(name, password, roles, tags) VALUES ($1,$2,$3,$4);",
-    nu
-);
+auto one2 = co_await txn.select_one_reflect_expected<Row>(
+    "SELECT id, name AS username FROM users WHERE id=$1", 1);
 ```
 
-### Mapping rules
-
-* Fields matched **by name**; aliases (e.g. `AS username`) supported.
-  If names unavailable, falls back to positional order.
-* `std::optional<T>` ↔ `NULL`.
-* Containers (`std::vector`, `std::array`, etc.) ↔ PostgreSQL arrays.
-* Aggregates and tuples expand into `$1..$N` parameters.
-* Pointers (except `char*`) are not supported.
-
----
-
-## Pipelined query execution
-
-Enable pipeline mode at compile time using template flag `<true>`:
+DML с `QueryResult`:
 
 ```cpp
-auto r1 = co_await txn.query<true>("INSERT INTO logs(msg) VALUES($1)", "A");
-auto r2 = co_await txn.query<true>("INSERT INTO logs(msg) VALUES($1)", "B");
+struct Patch { std::string name; int64_t id; };
+auto upd = co_await txn.exec_reflect(
+    "UPDATE users SET name=$1 WHERE id=$2", Patch{"alice", 5});
+if (!upd.ok) { /* upd.error, upd.err_detail */ }
 ```
 
-When `<true>`:
+### Legacy reflect API (**Deprecated**)
 
-* Queries are queued without waiting for previous results.
-* `PQsendQueryParams` calls are batched and flushed once.
-* Results are consumed after an implicit sync.
+| Method                           | Return             | Status     |
+|----------------------------------|--------------------|------------|
+| `query_reflect<T>(sql, ...)`     | `std::vector<T>`   | Deprecated |
+| `query_reflect_one<T>(sql, ...)` | `std::optional<T>` | Deprecated |
+| `select_reflect<T>(...)`         | `std::vector<T>`   | Deprecated |
+| `select_one_reflect<T>(...)`     | `std::optional<T>` | Deprecated |
 
-Use only for **independent** statements.
-
-| Template flag | Description                                    |
-|---------------|------------------------------------------------|
-| `<false>`     | Default. Sequential per-query execution.       |
-| `<true>`      | Pipeline mode. Batched async query submission. |
-
----
-
-## Commit and rollback
-
-```cpp
-bool ok = co_await txn.commit();
-if (!ok)
-    std::cout << "commit failed\n";
-```
-
-```cpp
-co_await txn.rollback();
-```
-
-Helpers:
-
-* `co_await txn.abort();` — sends `ABORT`
-* `co_await txn.finish();` — rollback if active, then cleanup
-
----
-
-## Connection lifecycle
-
-Each transaction pins one connection:
-
-1. Acquired from pool (`acquire_connection()`)
-2. Used exclusively until `commit()` / `rollback()`
-3. Released via `release_connection_async()`
-   (which drains pending results before recycle)
-
-Broken connections are retired automatically.
+Use `*_expected` instead of them.
 
 ---
 
 ## Subtransactions (SAVEPOINT)
 
-Nested transactions use `PgSubtransaction`.
-
 ```cpp
 auto sub = txn.make_subtx();
-
-if (co_await sub.begin())
-{
-    struct Patch { int v; int id; };
-    auto upd = co_await sub.exec_reflect(
-        "UPDATE t SET v=$1 WHERE id=$2",
-        Patch{42, 5}
-    );
-
+if (co_await sub.begin()) {
     struct Row { int id; int v; };
-    auto one = co_await sub.query_reflect_one<Row>(
-        "SELECT id, v FROM t WHERE id=$1",
-        5
-    );
-
-    if (!upd.ok) co_await sub.rollback();
-    else         co_await sub.commit();
+    auto r = co_await sub.query_reflect_expected<Row>(
+        "UPDATE t SET v=$1 WHERE id=$2 RETURNING id, v", 42, 5);
+    if (!r) co_await sub.rollback();
+    else    co_await sub.commit();
 }
 ```
 
@@ -258,28 +132,34 @@ Semantics:
 | `commit()`   | `RELEASE SAVEPOINT <name>`     |
 | `rollback()` | `ROLLBACK TO SAVEPOINT <name>` |
 
-They share the same parent connection.
-A failed subtransaction does not rollback the parent automatically.
+---
+
+## Pipeline mode
+
+```cpp
+auto r1 = co_await txn.query<true>("INSERT INTO logs(msg) VALUES($1)", "A");
+auto r2 = co_await txn.query<true>("INSERT INTO logs(msg) VALUES($1)", "B");
+```
+
+* `<true>` queues and batches `PQsendQueryParams`; results consumed after sync.
+* Use only for independent statements.
+
+---
+
+## Commit / Rollback / Finish
+
+```cpp
+bool ok = co_await txn.commit();
+if (!ok) { /* handle */ }
+
+co_await txn.rollback(); // explicit rollback
+co_await txn.finish();   // rollback if active, then cleanup
+```
 
 ---
 
 ## Error model
 
-* No exceptions — all results are structured (`QueryResult`)
-* Connection failures automatically invalidate the transaction
-* Using after rollback yields `PgErrorCode::InvalidFuture`
-
----
-
-## Summary
-
-| Feature                | Description                                          |
-|------------------------|------------------------------------------------------|
-| Dedicated connection   | One `PGconn` per transaction                         |
-| Configurable isolation | Serializable / Repeatable Read / Read Committed      |
-| Async operations       | Coroutine-suspending only, non-blocking              |
-| Safe pool return       | `release_connection_async()` drains before recycle   |
-| Auto invalidation      | Broken connections retired automatically             |
-| Subtransactions        | Nested `SAVEPOINT` support                           |
-| Reflect helpers        | `query_reflect`, `query_reflect_one`, `exec_reflect` |
-| Pipeline execution     | Compile-time `<true>` toggle for batched queries     |
+* No exceptions; `QueryResult` for low-level calls.
+* `*_expected` returns `std::expected<..., PgOpError>`.
+* Broken connections invalidate the transaction and are retired automatically.

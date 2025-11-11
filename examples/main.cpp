@@ -456,11 +456,19 @@ usub::uvent::task::Awaitable<void> tx_reflect_example(usub::pg::PgPool& pool)
                 tags     TEXT[]      NOT NULL DEFAULT '{}'
             );
         )SQL");
-        if (!r.ok) { std::cout << "[SCHEMA] " << r.error << "\n"; co_return; }
+        if (!r.ok)
+        {
+            std::cout << "[SCHEMA] " << r.error << "\n";
+            co_return;
+        }
     }
 
     usub::pg::PgTransaction tx(&pool);
-    if (!(co_await tx.begin())) { std::cout << "[TX] begin failed\n"; co_return; }
+    if (!(co_await tx.begin()))
+    {
+        std::cout << "[TX] begin failed\n";
+        co_return;
+    }
 
     {
         const char* timeout = "2s";
@@ -474,30 +482,47 @@ usub::uvent::task::Awaitable<void> tx_reflect_example(usub::pg::PgPool& pool)
         nu.name = "Kirill";
         nu.password = std::nullopt;
         nu.roles = std::vector<int>{1, 2, 5};
-        nu.tags  = std::vector<std::string>{"cpp", "uvent", "reflect"};
+        nu.tags = std::vector<std::string>{"cpp", "uvent", "reflect"};
 
         auto ins = co_await tx.query_reflect(
             "INSERT INTO users_r(name,password,roles,tags) VALUES($1,$2,$3,$4)", nu);
-        if (!ins.ok) { std::cout << "[INSERT] " << ins.error << "\n"; co_await tx.rollback(); co_return; }
+        if (!ins.ok)
+        {
+            std::cout << "[INSERT] " << ins.error << "\n";
+            co_await tx.rollback();
+            co_return;
+        }
 
         auto ins_ret = co_await tx.select_one_reflect<Ret>(
             "WITH ins AS (INSERT INTO users_r(name,password,roles,tags) VALUES($1,$2,$3,$4) RETURNING id, name) "
             "SELECT id, name AS username FROM ins", nu);
-        if (ins_ret) { inserted_id_1 = ins_ret->id; std::cout << "[INSERT->RET] id=" << ins_ret->id << " user=" << ins_ret->username << "\n"; }
+        if (ins_ret)
+        {
+            inserted_id_1 = ins_ret->id;
+            std::cout << "[INSERT->RET] id=" << ins_ret->id << " user=" << ins_ret->username << "\n";
+        }
     }
 
     int64_t inserted_id_2 = 0;
     {
         std::string name2 = "Bob";
         std::optional<std::string> pass2 = std::optional<std::string>("x");
-        std::vector<int> roles2; roles2.push_back(3); roles2.push_back(4);
-        std::vector<std::string> tags2; tags2.push_back("beta"); tags2.push_back("labs");
+        std::vector<int> roles2;
+        roles2.push_back(3);
+        roles2.push_back(4);
+        std::vector<std::string> tags2;
+        tags2.push_back("beta");
+        tags2.push_back("labs");
         auto tup2 = std::make_tuple(name2, pass2, roles2, tags2);
 
         auto ret = co_await tx.select_one_reflect<Ret>(
             "WITH ins AS (INSERT INTO users_r(name,password,roles,tags) VALUES($1,$2,$3,$4) RETURNING id, name) "
             "SELECT id, name AS username FROM ins", tup2);
-        if (ret) { inserted_id_2 = ret->id; std::cout << "[INSERT tuple->RET] id=" << ret->id << " user=" << ret->username << "\n"; }
+        if (ret)
+        {
+            inserted_id_2 = ret->id;
+            std::cout << "[INSERT tuple->RET] id=" << ret->id << " user=" << ret->username << "\n";
+        }
     }
 
     {
@@ -518,7 +543,9 @@ usub::uvent::task::Awaitable<void> tx_reflect_example(usub::pg::PgPool& pool)
         auto sub = tx.make_subtx();
         if (co_await sub.begin())
         {
-            std::vector<std::string> tags_commit; tags_commit.push_back("committed"); tags_commit.push_back("subtx");
+            std::vector<std::string> tags_commit;
+            tags_commit.push_back("committed");
+            tags_commit.push_back("subtx");
             int64_t id2 = inserted_id_2 > 0 ? inserted_id_2 : 2;
 
             auto r = co_await sub.query("UPDATE users_r SET tags = $1 WHERE id = $2 RETURNING id", tags_commit, id2);
@@ -538,7 +565,7 @@ usub::uvent::task::Awaitable<void> tx_reflect_example(usub::pg::PgPool& pool)
         for (auto& u : rows)
         {
             std::cout << "  id=" << u.id << " name=" << u.username
-                      << " pwd=" << (u.password ? *u.password : "<NULL>") << " roles=[";
+                << " pwd=" << (u.password ? *u.password : "<NULL>") << " roles=[";
             for (size_t i = 0; i < u.roles.size(); ++i) std::cout << u.roles[i] << (i + 1 < u.roles.size() ? "," : "");
             std::cout << "] tags=[";
             for (size_t i = 0; i < u.tags.size(); ++i) std::cout << u.tags[i] << (i + 1 < u.tags.size() ? "," : "");
@@ -1011,7 +1038,9 @@ usub::uvent::task::Awaitable<void> routing_example()
 
     co_return;
 }
-struct UserErrorRow {
+
+struct UserErrorRow
+{
     int id;
     std::string name;
     double balance;
@@ -1037,12 +1066,166 @@ usub::uvent::task::Awaitable<void> decode_fail_example(usub::pg::PgPool& pool)
         if (!ins.ok) std::cout << "[INSERT ERROR] " << ins.error << "\n";
     }
 
-    try {
+    try
+    {
         auto rows = co_await pool.query_reflect<UserErrorRow>(
             "SELECT id, name, balance FROM users_r");
         std::cout << "[ROWS] n=" << rows.size() << "\n";
-    } catch (const std::exception& ex) {
+    }
+    catch (const std::exception& ex)
+    {
         std::cerr << "!!! Decode error caught: " << ex.what() << "\n";
+    }
+
+    co_return;
+}
+
+usub::uvent::task::Awaitable<void> expected_reflect_example(usub::pg::PgPool& pool)
+{
+    using usub::pg::PgErrorCode;
+    using usub::pg::toString;
+
+    {
+        auto r = co_await pool.query_awaitable(R"SQL(
+            CREATE TABLE IF NOT EXISTS users_exp (
+                id       BIGSERIAL PRIMARY KEY,
+                name     TEXT NOT NULL,
+                password TEXT,
+                roles    INT4[] NOT NULL DEFAULT '{}',
+                tags     TEXT[] NOT NULL DEFAULT '{}'
+            );
+        )SQL");
+        if (!r.ok)
+        {
+            std::cout << "[EXP/SCHEMA] " << r.error << "\n";
+            co_return;
+        }
+
+        auto t1 = co_await pool.query_awaitable("TRUNCATE users_exp RESTART IDENTITY");
+        if (!t1.ok)
+        {
+            std::cout << "[EXP/TRUNCATE] " << t1.error << "\n";
+            co_return;
+        }
+
+        NewUser a{.name = "Alice", .password = std::nullopt, .roles = {1, 2}, .tags = {"alpha"}};
+        NewUser b{.name = "Bob", .password = std::string("x"), .roles = {3}, .tags = {"beta", "labs"}};
+
+        auto i1 = co_await pool.exec_reflect(
+            "INSERT INTO users_exp(name,password,roles,tags) VALUES($1,$2,$3,$4)", a);
+        auto i2 = co_await pool.exec_reflect(
+            "INSERT INTO users_exp(name,password,roles,tags) VALUES($1,$2,$3,$4)", b);
+        if (!i1.ok || !i2.ok)
+        {
+            std::cout << "[EXP/INSERT] " << (i1.ok ? "" : i1.error) << " " << (i2.ok ? "" : i2.error) << "\n";
+            co_return;
+        }
+    }
+
+    {
+        auto exp_rows = co_await pool.query_reflect_expected<UserRow>(
+            "SELECT id, name AS username, password, roles, tags FROM users_exp ORDER BY id");
+
+        if (!exp_rows)
+        {
+            const auto& e = exp_rows.error();
+            std::cout << "[EXP/SELECT] fail code=" << toString(e.code)
+                << " sqlstate=" << e.err_detail.sqlstate
+                << " msg=" << e.error << "\n";
+        }
+        else
+        {
+            std::cout << "[EXP/SELECT] n=" << exp_rows->size() << "\n";
+        }
+    }
+
+    {
+        auto one = co_await pool.query_reflect_expected_one<UserRow>(
+            "SELECT id, name AS username, password, roles, tags FROM users_exp WHERE name = $1 LIMIT 1",
+            std::string("Alice"));
+
+        if (!one)
+        {
+            const auto& e = one.error();
+            std::cout << "[EXP/ONE Alice] fail code=" << toString(e.code)
+                << " msg=" << e.error << "\n";
+        }
+        else
+        {
+            std::cout << "[EXP/ONE Alice] id=" << one->id << " user=" << one->username << "\n";
+        }
+    }
+
+    {
+        auto one = co_await pool.query_reflect_expected_one<UserRow>(
+            "SELECT id, name AS username, password, roles, tags FROM users_exp WHERE name = $1 LIMIT 1",
+            std::string("Nobody"));
+
+        if (!one)
+        {
+            const auto& e = one.error();
+            std::cout << "[EXP/ONE Nobody] fail code=" << toString(e.code)
+                << " msg=" << e.error << "\n"; // ожидаем "no rows"
+        }
+        else
+        {
+            std::cout << "[EXP/ONE Nobody] unexpected row id=" << one->id << "\n";
+        }
+    }
+
+    {
+        usub::pg::PgTransaction tx(&pool);
+        if (!(co_await tx.begin()))
+        {
+            std::cout << "[EXP/TX] begin failed\n";
+            co_return;
+        }
+
+        Upd u{.name = "Alice_exp_upd", .id = 1};
+        auto upd = co_await tx.query_reflect_expected_one<Ret>(
+            "UPDATE users_exp SET name = $1 WHERE id = $2 RETURNING id, name AS username",
+            u);
+
+        if (!upd)
+        {
+            const auto& e = upd.error();
+            std::cout << "[EXP/TX/UPDATE] fail code=" << toString(e.code)
+                << " sqlstate=" << e.err_detail.sqlstate
+                << " msg=" << e.error << "\n";
+            co_await tx.rollback();
+            co_return;
+        }
+        else
+        {
+            std::cout << "[EXP/TX/UPDATE] id=" << upd->id << " user=" << upd->username << "\n";
+        }
+
+        auto list = co_await tx.query_reflect_expected<UserRow>(
+            "SELECT id, name AS username, password, roles, tags FROM users_exp ORDER BY id");
+        if (!list)
+        {
+            const auto& e = list.error();
+            std::cout << "[EXP/TX/SELECT] fail code=" << toString(e.code)
+                << " msg=" << e.error << "\n";
+            co_await tx.rollback();
+            co_return;
+        }
+        std::cout << "[EXP/TX/SELECT] n=" << list->size() << "\n";
+
+        if (!(co_await tx.commit())) std::cout << "[EXP/TX] commit failed\n";
+    }
+
+    {
+        auto bad = co_await pool.query_reflect_expected<UserRow>(
+            "SELECT id, non_existing AS username, password, roles, tags FROM users_exp");
+        if (!bad)
+        {
+            const auto& e = bad.error();
+            std::cout << "[EXP/ERROR demo] code=" << toString(e.code)
+                << " sqlstate=" << e.err_detail.sqlstate
+                << " category=" << usub::pg::toString(e.err_detail.category)
+                << " msg=" << e.error << "\n";
+        }
     }
 
     co_return;
@@ -1079,6 +1262,7 @@ int main()
     system::co_spawn(tx_reflect_example(pool));
     system::co_spawn(routing_example());
     system::co_spawn(decode_fail_example(pool));
+    system::co_spawn(expected_reflect_example(pool));
 
     uvent.run();
     return 0;

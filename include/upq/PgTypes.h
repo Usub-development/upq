@@ -693,6 +693,13 @@ namespace usub::pg
     } // namespace detail
 
     class PgConnectionLibpq;
+
+    struct PgOpError
+    {
+        PgErrorCode code{PgErrorCode::Unknown};
+        std::string error;
+        PgErrorDetail err_detail;
+    };
 } // namespace usub::pg
 
 #endif

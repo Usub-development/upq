@@ -7,6 +7,7 @@
 #include <optional>
 #include <atomic>
 #include <chrono>
+#include <expected>
 
 #include "uvent/Uvent.h"
 #include "PgConnection.h"
@@ -35,7 +36,6 @@ namespace usub::pg
         usub::uvent::task::Awaitable<void>
         release_connection_async(std::shared_ptr<PgConnectionLibpq> conn);
 
-        // ---------- существующий API ----------
         template <typename... Args>
         usub::uvent::task::Awaitable<QueryResult>
         query_on(std::shared_ptr<PgConnectionLibpq> const& conn,
@@ -46,7 +46,6 @@ namespace usub::pg
         usub::uvent::task::Awaitable<QueryResult>
         query_awaitable(const std::string& sql, Args&&... args);
 
-        // -------- reflect => T (без параметров)
         template <class T>
         usub::uvent::task::Awaitable<std::vector<T>>
         query_on_reflect(std::shared_ptr<PgConnectionLibpq> const& conn,
@@ -58,33 +57,128 @@ namespace usub::pg
                              const std::string& sql);
 
         template <class T>
-        usub::uvent::task::Awaitable<std::vector<T>>
+        [[deprecated]] usub::uvent::task::Awaitable<std::vector<T>>
         query_reflect(const std::string& sql);
 
         template <class T>
-        usub::uvent::task::Awaitable<std::optional<T>>
+        [[deprecated]] usub::uvent::task::Awaitable<std::optional<T>>
         query_reflect_one(const std::string& sql);
 
-        // -------- reflect => T (с параметрами, variadic)
+        template <class T>
+        usub::uvent::task::Awaitable<std::expected<std::vector<T>, PgOpError>>
+        query_on_reflect_expected(std::shared_ptr<PgConnectionLibpq> const& conn,
+                                  const std::string& sql)
+        {
+            QueryResult qr = co_await query_on(conn, sql);
+            if (!qr.ok)
+                co_return std::unexpected(PgOpError{qr.code, std::move(qr.error), std::move(qr.err_detail)});
+            auto rows = co_await conn->exec_simple_query_nonblocking<T>(sql);
+            co_return std::expected<std::vector<T>, PgOpError>{std::in_place, std::move(rows)};
+        }
+
+        template <class T>
+        usub::uvent::task::Awaitable<std::expected<T, PgOpError>>
+        query_on_reflect_expected_one(std::shared_ptr<PgConnectionLibpq> const& conn,
+                                      const std::string& sql)
+        {
+            QueryResult qr = co_await query_on(conn, sql);
+            if (!qr.ok)
+                co_return std::unexpected(PgOpError{qr.code, std::move(qr.error), std::move(qr.err_detail)});
+
+            auto row = co_await conn->exec_simple_query_one_nonblocking<T>(sql);
+            if (!row)
+                co_return std::unexpected(PgOpError{PgErrorCode::Unknown, "no rows", {}});
+            co_return std::expected<T, PgOpError>{std::in_place, std::move(*row)};
+        }
+
+        template <class T>
+        usub::uvent::task::Awaitable<std::expected<std::vector<T>, PgOpError>>
+        query_reflect_expected(const std::string& sql)
+        {
+            auto conn = co_await acquire_connection();
+            auto res = co_await query_on_reflect_expected<T>(conn, sql);
+            co_await release_connection_async(conn);
+            co_return res;
+        }
+
+        template <class T>
+        usub::uvent::task::Awaitable<std::expected<T, PgOpError>>
+        query_reflect_expected_one(const std::string& sql)
+        {
+            auto conn = co_await acquire_connection();
+            auto res = co_await query_on_reflect_expected_one<T>(conn, sql);
+            co_await release_connection_async(conn);
+            co_return res;
+        }
+
         template <class T, typename... Args>
-        usub::uvent::task::Awaitable<std::vector<T>>
+        [[deprecated]] usub::uvent::task::Awaitable<std::vector<T>>
         query_on_reflect(std::shared_ptr<PgConnectionLibpq> const& conn,
                          const std::string& sql, Args&&... args);
 
         template <class T, typename... Args>
-        usub::uvent::task::Awaitable<std::optional<T>>
+        [[deprecated]] usub::uvent::task::Awaitable<std::optional<T>>
         query_on_reflect_one(std::shared_ptr<PgConnectionLibpq> const& conn,
                              const std::string& sql, Args&&... args);
 
         template <class T, typename... Args>
-        usub::uvent::task::Awaitable<std::vector<T>>
+        [[deprecated]] usub::uvent::task::Awaitable<std::vector<T>>
         query_reflect(const std::string& sql, Args&&... args);
 
         template <class T, typename... Args>
-        usub::uvent::task::Awaitable<std::optional<T>>
+        [[deprecated]] usub::uvent::task::Awaitable<std::optional<T>>
         query_reflect_one(const std::string& sql, Args&&... args);
 
-        // -------- exec_reflect (DML/DDL с объектом)
+        template <class T, typename... Args>
+        usub::uvent::task::Awaitable<std::expected<std::vector<T>, PgOpError>>
+        query_on_reflect_expected(std::shared_ptr<PgConnectionLibpq> const& conn,
+                                  const std::string& sql, Args&&... args)
+        {
+            QueryResult qr = co_await query_on(conn, sql, std::forward<Args>(args)...);
+            if (!qr.ok)
+                co_return std::unexpected(PgOpError{qr.code, std::move(qr.error), std::move(qr.err_detail)});
+
+            auto rows = co_await conn->exec_param_query_nonblocking<T>(
+                sql, std::forward<Args>(args)...);
+            co_return std::expected<std::vector<T>, PgOpError>{std::in_place, std::move(rows)};
+        }
+
+        template <class T, typename... Args>
+        usub::uvent::task::Awaitable<std::expected<T, PgOpError>>
+        query_on_reflect_expected_one(std::shared_ptr<PgConnectionLibpq> const& conn,
+                                      const std::string& sql, Args&&... args)
+        {
+            QueryResult qr = co_await query_on(conn, sql, std::forward<Args>(args)...);
+            if (!qr.ok)
+                co_return std::unexpected(PgOpError{qr.code, std::move(qr.error), std::move(qr.err_detail)});
+
+            auto row = co_await conn->exec_param_query_one_nonblocking<T>(
+                sql, std::forward<Args>(args)...);
+            if (!row)
+                co_return std::unexpected(PgOpError{PgErrorCode::Unknown, "no rows", {}});
+            co_return std::expected<T, PgOpError>{std::in_place, std::move(*row)};
+        }
+
+        template <class T, typename... Args>
+        usub::uvent::task::Awaitable<std::expected<std::vector<T>, PgOpError>>
+        query_reflect_expected(const std::string& sql, Args&&... args)
+        {
+            auto conn = co_await acquire_connection();
+            auto res = co_await query_on_reflect_expected<T>(conn, sql, std::forward<Args>(args)...);
+            co_await release_connection_async(conn);
+            co_return res;
+        }
+
+        template <class T, typename... Args>
+        usub::uvent::task::Awaitable<std::expected<T, PgOpError>>
+        query_reflect_expected_one(const std::string& sql, Args&&... args)
+        {
+            auto conn = co_await acquire_connection();
+            auto res = co_await query_on_reflect_expected_one<T>(conn, sql, std::forward<Args>(args)...);
+            co_await release_connection_async(conn);
+            co_return res;
+        }
+
         template <class Obj>
         usub::uvent::task::Awaitable<QueryResult>
         exec_reflect_on(std::shared_ptr<PgConnectionLibpq> const& conn,
@@ -126,8 +220,6 @@ namespace usub::pg
 
         HealthStats stats_;
     };
-
-    // -------------------- impl --------------------
 
     template <typename... Args>
     usub::uvent::task::Awaitable<QueryResult>
@@ -220,7 +312,6 @@ namespace usub::pg
         co_return row;
     }
 
-    // ---- reflect с параметрами ----
     template <class T, typename... Args>
     usub::uvent::task::Awaitable<std::vector<T>>
     PgPool::query_on_reflect(std::shared_ptr<PgConnectionLibpq> const& conn,
