@@ -370,6 +370,10 @@ namespace usub::pg
                     }
                     return false;
                 }
+                else if constexpr (std::is_enum_v<T>)
+                {
+                    return detail::enum_from_token_impl(sv, out);
+                }
                 else { return false; }
             }
         };
@@ -448,6 +452,12 @@ namespace usub::pg
                         T v{};
                         if (!(iss >> v) || !fully_consumed(iss)) return false;
                         out.emplace_back(std::move(v));
+                    }
+                    else if constexpr (std::is_enum_v<T>)
+                    {
+                        T v{};
+                        if (!detail::enum_from_token_impl(tok, v)) return false;
+                        out.emplace_back(v);
                     }
                     else
                     {
@@ -541,6 +551,18 @@ namespace usub::pg
                 }(), ... );
             }(std::make_index_sequence<N>{});
         }
+        template <class E>
+        struct ToPg<E, std::enable_if_t<std::is_enum_v<E>>> {
+            static void append(std::string& dst, E v) {
+                std::string tok;
+                if (::usub::pg::detail::enum_to_token_impl(v, tok)) {
+                    append_escaped(dst, tok);
+                } else {
+                    using U = std::underlying_type_t<E>;
+                    dst += std::to_string(static_cast<long long>(static_cast<U>(v)));
+                }
+            }
+        };
 #endif // UPQ_ENABLE_PARAM_ENCODER
 
         inline int find_col_idx(const std::vector<std::string>& cols, std::string_view norm_name)

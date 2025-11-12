@@ -230,11 +230,33 @@ namespace usub::pg
             else ps.set_null();
         }
 
+        template <EnumType E>
+        inline void encode_one(ParamSlices& ps, E v)
+        {
+            std::string tok;
+            if (enum_to_token_impl<E>(v, tok))
+            {
+                ps.set_text(tok);
+                return;
+            }
+            using U = std::underlying_type_t<E>;
+            if constexpr (sizeof(U) <= 2)
+                ps.set_bin_integral<uint16_t>(static_cast<uint16_t>(static_cast<U>(v)), detail::INT2OID);
+            else if constexpr (sizeof(U) == 4)
+                ps.set_bin_integral<uint32_t>(static_cast<uint32_t>(static_cast<U>(v)), detail::INT4OID);
+            else
+                ps.set_bin_integral<uint64_t>(static_cast<uint64_t>(static_cast<U>(v)), detail::INT8OID);
+        }
+
         template <Optional Opt>
         inline void encode_one(ParamSlices& ps, Opt&& ov)
         {
-            if (!ov) ps.set_null();
-            else encode_one(ps, *ov);
+            if (!ov)
+            {
+                ps.set_null();
+                return;
+            }
+            encode_one(ps, *ov);
         }
 
         template <ArrayLike C>
@@ -272,9 +294,9 @@ namespace usub::pg
         }
 
         template <class Tup>
-            requires (::usub::pg::detail::is_tuple_like_v<std::decay_t<Tup>> &&
-                !ArrayLike<std::decay_t<Tup>> &&
-                !CArrayLike<std::decay_t<Tup>>)
+            requires (::usub::pg::detail::is_tuple_like_v<std::decay_t<Tup>>
+                && !ArrayLike<std::decay_t<Tup>>
+                && !CArrayLike<std::decay_t<Tup>>)
         inline void encode_one(ParamSlices& ps, const Tup& tup)
         {
             using DT = std::decay_t<Tup>;
@@ -285,10 +307,10 @@ namespace usub::pg
         }
 
         template <class T>
-            requires (::usub::pg::detail::ReflectAggregate<std::decay_t<T>> &&
-                !::usub::pg::detail::is_tuple_like_v<std::decay_t<T>> &&
-                !ArrayLike<std::decay_t<T>> &&
-                !CArrayLike<std::decay_t<T>>)
+            requires (::usub::pg::detail::ReflectAggregate<std::decay_t<T>>
+                && !::usub::pg::detail::is_tuple_like_v<std::decay_t<T>>
+                && !ArrayLike<std::decay_t<T>>
+                && !CArrayLike<std::decay_t<T>>)
         inline void encode_one(ParamSlices& ps, const T& obj)
         {
             using V = std::decay_t<T>;
@@ -304,11 +326,13 @@ namespace usub::pg
             requires (!Integral<T> && !Floating<T> && !StringLike<T> && !CharPtr<T> &&
                 !Optional<T> && !ArrayLike<T> && !CArrayLike<T> &&
                 !AssociativeLike<T> && !std::is_same_v<std::decay_t<T>, bool> &&
-                !InitList<T>)
+                !InitList<T> && !EnumType<T>)
         inline void encode_one(ParamSlices& ps, T&& v)
         {
-            if constexpr (std::is_convertible_v<T, std::string_view>) ps.set_text(std::string_view(v));
-            else if constexpr (std::is_constructible_v<std::string, T>) ps.set_text(std::string(std::forward<T>(v)));
+            if constexpr (std::is_convertible_v<T, std::string_view>)
+                ps.set_text(std::string_view(v));
+            else if constexpr (std::is_constructible_v<std::string, T>)
+                ps.set_text(std::string(std::forward<T>(v)));
             else if constexpr (std::is_pointer_v<std::decay_t<T>>)
             {
                 static_assert(!std::is_pointer_v<std::decay_t<T>>, "Unsupported pointer parameter");
@@ -365,8 +389,9 @@ namespace usub::pg
         };
 
         template <class T>
-            requires (::usub::pg::detail::ReflectAggregate<T> && !::usub::pg::detail::is_tuple_like_v<T> && !ArrayLike<
-                T> && !CArrayLike<T>)
+            requires (::usub::pg::detail::ReflectAggregate<T>
+                && !::usub::pg::detail::is_tuple_like_v<T>
+                && !ArrayLike<T> && !CArrayLike<T>)
         struct param_arity_impl<T>
         {
             static constexpr size_t value = ureflect::count_members<std::decay_t<T>>;

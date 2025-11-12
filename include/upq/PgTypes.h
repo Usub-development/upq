@@ -14,6 +14,9 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#include <type_traits>
+#include <charconv>
+#include "ureflect/ureflect_auto.h"
 
 #include <openssl/md5.h>
 
@@ -501,6 +504,7 @@ namespace usub::pg
 
         template <class T> concept Integral = std::is_integral_v<Decay<T>> && !std::is_same_v<Decay<T>, bool>;
         template <class T> concept Floating = std::is_floating_point_v<Decay<T>>;
+        template <class T> concept EnumType = std::is_enum_v<std::decay_t<T>>;
 
         template <class T> concept Optional =
             requires { typename Decay<T>::value_type; } &&
@@ -574,6 +578,78 @@ namespace usub::pg
             else return 64;
         }
 
+        namespace upq
+        {
+            template <auto... Es>
+            consteval auto enumerate()
+            {
+                using E = std::common_type_t<decltype(Es)...>;
+                return std::array<std::pair<E, std::string_view>, sizeof...(Es)>{
+                    {{Es, ::ureflect::enum_name<Es>()}...}
+                };
+            }
+
+            template <typename E>
+            struct enum_meta;
+        }
+
+        template <class, class = void>
+        struct has_enum_mapping : std::false_type
+        {
+        };
+
+        template <class E>
+        struct has_enum_mapping<E, std::void_t<decltype(upq::enum_meta<E>::mapping)>> : std::true_type
+        {
+        };
+
+        template <class E>
+        inline bool enum_to_token_impl(E v, std::string& out)
+        {
+            if constexpr (has_enum_mapping<E>::value)
+            {
+                for (auto&& p : upq::enum_meta<E>::mapping)
+                {
+                    if (p.first == v)
+                    {
+                        out = std::string(p.second);
+                        return true;
+                    }
+                }
+                return false;
+            }
+            else
+            {
+                return false;
+            }
+        }
+
+        template <class E>
+        inline bool enum_from_token_impl(std::string_view sv, E& out)
+        {
+            if constexpr (has_enum_mapping<E>::value)
+            {
+                for (auto&& p : upq::enum_meta<E>::mapping)
+                {
+                    if (p.second == sv)
+                    {
+                        out = p.first;
+                        return true;
+                    }
+                }
+            }
+            using U = std::underlying_type_t<E>;
+            U tmp{};
+            const char* b = sv.data();
+            const char* e = sv.data() + sv.size();
+            if (auto r = std::from_chars(b, e, tmp); r.ec == std::errc() && r.ptr == e)
+            {
+                out = static_cast<E>(tmp);
+                return true;
+            }
+            return false;
+        }
+
         template <class T>
         inline void write_array_scalar(std::string& out, const T& v)
         {
@@ -620,6 +696,19 @@ namespace usub::pg
                 std::ostringstream oss;
                 oss << v;
                 pg_array_escape_elem(out, oss.str());
+            }
+            else if constexpr (EnumType<T>)
+            {
+                std::string tok;
+                if (!enum_to_token_impl(v, tok))
+                {
+                    using U = std::underlying_type_t<std::decay_t<T>>;
+                    out += std::to_string(static_cast<long long>(static_cast<U>(v)));
+                }
+                else
+                {
+                    pg_array_escape_elem(out, tok);
+                }
             }
             else
             {

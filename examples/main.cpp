@@ -7,6 +7,7 @@
 #include <list>
 
 #include "uvent/Uvent.h"
+#include "upq/PgTypes.h"
 #include "upq/PgPool.h"
 #include "upq/PgTransaction.h"
 #include "upq/PgNotificationListener.h"
@@ -1231,6 +1232,146 @@ usub::uvent::task::Awaitable<void> expected_reflect_example(usub::pg::PgPool& po
     co_return;
 }
 
+enum class RoleKind { admin, user, guest };
+
+namespace usub::pg::detail::upq
+{
+    template <>
+    struct enum_meta<RoleKind>
+    {
+        static constexpr std::pair<RoleKind, std::string_view> mapping[] = {
+            {RoleKind::admin, "admin"},
+            {RoleKind::user, "user"},
+            {RoleKind::guest, "guest"},
+        };
+    };
+}
+
+struct EnumIns
+{
+    std::string name;
+    RoleKind kind;
+    std::optional<RoleKind> alt_kind;
+    std::vector<RoleKind> kinds;
+};
+
+struct EnumRow
+{
+    int64_t id;
+    std::string name;
+    RoleKind kind;
+    std::optional<RoleKind> alt_kind;
+    std::vector<RoleKind> kinds;
+};
+
+task::Awaitable<void> test_enum_support(usub::pg::PgPool& pool)
+{
+    {
+        auto r = co_await pool.query_awaitable(R"SQL(
+            CREATE TABLE IF NOT EXISTS users_enum (
+                id        BIGSERIAL PRIMARY KEY,
+                name      TEXT        NOT NULL,
+                kind      TEXT        NOT NULL,
+                alt_kind  TEXT        NULL,
+                kinds     TEXT[]      NOT NULL DEFAULT '{}'
+            );
+        )SQL");
+        if (!r.ok)
+        {
+            std::cout << "[ENUM/SCHEMA] " << r.error << "\n";
+            co_return;
+        }
+        auto t = co_await pool.query_awaitable("TRUNCATE users_enum RESTART IDENTITY");
+        if (!t.ok)
+        {
+            std::cout << "[ENUM/TRUNCATE] " << t.error << "\n";
+            co_return;
+        }
+    }
+
+    {
+        EnumIns u{
+            .name = "Alice",
+            .kind = RoleKind::admin,
+            .alt_kind = std::nullopt,
+            .kinds = {RoleKind::admin, RoleKind::user}
+        };
+        auto ins = co_await pool.exec_reflect(
+            "INSERT INTO users_enum(name, kind, alt_kind, kinds) VALUES($1,$2,$3,$4)", u);
+        if (!ins.ok)
+        {
+            std::cout << "[ENUM/INSERT#1] " << ins.error << "\n";
+            co_return;
+        }
+    }
+
+    {
+        std::string name = "Bob";
+        RoleKind kind = RoleKind::user;
+        std::optional<RoleKind> alt = RoleKind::guest;
+        std::vector<RoleKind> kinds{RoleKind::user, RoleKind::guest};
+        auto ins2 = co_await pool.exec_reflect(
+            "INSERT INTO users_enum(name, kind, alt_kind, kinds) VALUES($1,$2,$3,$4)",
+            std::tuple{name, kind, alt, kinds});
+        if (!ins2.ok)
+        {
+            std::cout << "[ENUM/INSERT#2] " << ins2.error << "\n";
+            co_return;
+        }
+    }
+
+    {
+        auto rows = co_await pool.query_reflect<EnumRow>(
+            "SELECT id, name, kind, alt_kind, kinds FROM users_enum ORDER BY id");
+        std::cout << "[ENUM/SELECT] n=" << rows.size() << "\n";
+        for (auto& r : rows)
+        {
+            std::cout << "  id=" << r.id
+                << " name=" << r.name
+                << " kind=" << (r.kind == RoleKind::admin ? "admin" : r.kind == RoleKind::user ? "user" : "guest")
+                << " alt=" << (r.alt_kind
+                                   ? (*r.alt_kind == RoleKind::admin
+                                          ? "admin"
+                                          : *r.alt_kind == RoleKind::user
+                                          ? "user"
+                                          : "guest")
+                                   : "<NULL>")
+                << " kinds=[";
+            for (size_t i = 0; i < r.kinds.size(); ++i)
+            {
+                if (i) std::cout << ",";
+                auto k = r.kinds[i];
+                std::cout << (k == RoleKind::admin ? "admin" : k == RoleKind::user ? "user" : "guest");
+            }
+            std::cout << "]\n";
+        }
+    }
+
+    {
+        auto rows = co_await pool.query_reflect<EnumRow>(
+            "SELECT id, name, kind, alt_kind, kinds FROM users_enum WHERE kind = $1 ORDER BY id",
+            RoleKind::user);
+        std::cout << "[ENUM/FILTER kind=user] n=" << rows.size() << "\n";
+    }
+
+    {
+        auto rows = co_await pool.query_reflect<EnumRow>(
+            "SELECT id, name, kind, alt_kind, kinds FROM users_enum WHERE alt_kind IS NULL ORDER BY id");
+        std::cout << "[ENUM/FILTER alt_kind IS NULL] n=" << rows.size() << "\n";
+    }
+
+    {
+        std::vector<RoleKind> need{RoleKind::admin, RoleKind::guest};
+        auto rows = co_await pool.query_reflect<EnumRow>(
+            "SELECT id, name, kind, alt_kind, kinds FROM users_enum "
+            "WHERE kinds && $1::text[] ORDER BY id",
+            need);
+        std::cout << "[ENUM/OVERLAP kinds] n=" << rows.size() << "\n";
+    }
+
+    co_return;
+}
+
 int main()
 {
     settings::timeout_duration_ms = 5000;
@@ -1263,6 +1404,7 @@ int main()
     system::co_spawn(routing_example());
     system::co_spawn(decode_fail_example(pool));
     system::co_spawn(expected_reflect_example(pool));
+    system::co_spawn(test_enum_support(pool));
 
     uvent.run();
     return 0;
