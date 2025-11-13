@@ -16,6 +16,9 @@
 #include <vector>
 #include <type_traits>
 #include <charconv>
+#include <sstream>
+#include <typeinfo>
+
 #include "ureflect/ureflect_auto.h"
 
 #include <openssl/md5.h>
@@ -555,7 +558,7 @@ namespace usub::pg
             !InitList<T> &&
             requires { typename Decay<T>::value_type; };
 
-        // FIX: detect C-arrays on the original type (not decay) to catch T(&)[N]
+        // detect C-arrays on original type (to catch T(&)[N])
         template <class T>
         concept CArrayLike = std::is_array_v<std::remove_reference_t<T>>;
 
@@ -578,8 +581,10 @@ namespace usub::pg
             else return 64;
         }
 
+        // -------- enum_meta + enumerate (ureflect) ----------
         namespace upq
         {
+            // glaze-style helper: enum -> string_view через ureflect::enum_name<E>()
             template <auto... Es>
             consteval auto enumerate()
             {
@@ -612,7 +617,7 @@ namespace usub::pg
                 {
                     if (p.first == v)
                     {
-                        out = std::string(p.second);
+                        out.assign(p.second);
                         return true;
                     }
                 }
@@ -638,6 +643,7 @@ namespace usub::pg
                     }
                 }
             }
+
             using U = std::underlying_type_t<E>;
             U tmp{};
             const char* b = sv.data();

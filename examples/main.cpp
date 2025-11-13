@@ -494,13 +494,24 @@ usub::uvent::task::Awaitable<void> tx_reflect_example(usub::pg::PgPool& pool)
             co_return;
         }
 
-        auto ins_ret = co_await tx.select_one_reflect<Ret>(
-            "WITH ins AS (INSERT INTO users_r(name,password,roles,tags) VALUES($1,$2,$3,$4) RETURNING id, name) "
-            "SELECT id, name AS username FROM ins", nu);
+        // INSERT ... RETURNING -> expected_one
+        auto ins_ret = co_await tx.query_reflect_expected_one<Ret>(
+            "WITH ins AS (INSERT INTO users_r(name,password,roles,tags)"
+            " VALUES($1,$2,$3,$4) RETURNING id, name) "
+            "SELECT id, name AS username FROM ins",
+            nu);
+
         if (ins_ret)
         {
             inserted_id_1 = ins_ret->id;
-            std::cout << "[INSERT->RET] id=" << ins_ret->id << " user=" << ins_ret->username << "\n";
+            std::cout << "[INSERT->RET] id=" << ins_ret->id
+                << " user=" << ins_ret->username << "\n";
+        }
+        else
+        {
+            const auto& e = ins_ret.error();
+            std::cout << "[INSERT->RET] fail " << usub::pg::toString(e.code)
+                << " msg=" << e.error << "\n";
         }
     }
 
@@ -508,21 +519,28 @@ usub::uvent::task::Awaitable<void> tx_reflect_example(usub::pg::PgPool& pool)
     {
         std::string name2 = "Bob";
         std::optional<std::string> pass2 = std::optional<std::string>("x");
-        std::vector<int> roles2;
-        roles2.push_back(3);
-        roles2.push_back(4);
-        std::vector<std::string> tags2;
-        tags2.push_back("beta");
-        tags2.push_back("labs");
+        std::vector<int> roles2{3, 4};
+        std::vector<std::string> tags2{"beta", "labs"};
         auto tup2 = std::make_tuple(name2, pass2, roles2, tags2);
 
-        auto ret = co_await tx.select_one_reflect<Ret>(
-            "WITH ins AS (INSERT INTO users_r(name,password,roles,tags) VALUES($1,$2,$3,$4) RETURNING id, name) "
-            "SELECT id, name AS username FROM ins", tup2);
+        auto ret = co_await tx.query_reflect_expected_one<Ret>(
+            "WITH ins AS (INSERT INTO users_r(name,password,roles,tags)"
+            " VALUES($1,$2,$3,$4) RETURNING id, name) "
+            "SELECT id, name AS username FROM ins",
+            tup2);
+
         if (ret)
         {
             inserted_id_2 = ret->id;
-            std::cout << "[INSERT tuple->RET] id=" << ret->id << " user=" << ret->username << "\n";
+            std::cout << "[INSERT tuple->RET] id=" << ret->id
+                << " user=" << ret->username << "\n";
+        }
+        else
+        {
+            const auto& e = ret.error();
+            std::cout << "[INSERT tuple->RET] fail "
+                << usub::pg::toString(e.code)
+                << " msg=" << e.error << "\n";
         }
     }
 
@@ -530,12 +548,12 @@ usub::uvent::task::Awaitable<void> tx_reflect_example(usub::pg::PgPool& pool)
         auto sub = tx.make_subtx();
         if (co_await sub.begin())
         {
-            UpdRoles u;
-            u.roles = std::vector<int>{9, 9, 9};
-            u.id = inserted_id_1 > 0 ? inserted_id_1 : 1;
+            UpdRoles u{.roles = {9, 9, 9}, .id = inserted_id_1 > 0 ? inserted_id_1 : 1};
 
-            auto r = co_await sub.query_reflect("UPDATE users_r SET roles = $1 WHERE id = $2", u);
-            std::cout << "[SUBTX UPDATE] ok=" << r.ok << " affected=" << r.rows_affected << " (rollback)\n";
+            auto r = co_await sub.query_reflect(
+                "UPDATE users_r SET roles = $1 WHERE id = $2", u);
+            std::cout << "[SUBTX UPDATE] ok=" << r.ok
+                << " affected=" << r.rows_affected << " (rollback)\n";
             co_await sub.rollback();
         }
     }
@@ -544,66 +562,116 @@ usub::uvent::task::Awaitable<void> tx_reflect_example(usub::pg::PgPool& pool)
         auto sub = tx.make_subtx();
         if (co_await sub.begin())
         {
-            std::vector<std::string> tags_commit;
-            tags_commit.push_back("committed");
-            tags_commit.push_back("subtx");
+            std::vector<std::string> tags_commit{"committed", "subtx"};
             int64_t id2 = inserted_id_2 > 0 ? inserted_id_2 : 2;
 
-            auto r = co_await sub.query("UPDATE users_r SET tags = $1 WHERE id = $2 RETURNING id", tags_commit, id2);
+            auto r = co_await sub.query(
+                "UPDATE users_r SET tags = $1 WHERE id = $2 RETURNING id",
+                tags_commit, id2);
             bool ok = r.ok;
             uint64_t aff = r.rows_affected;
             bool committed = co_await sub.commit();
-            std::cout << "[SUBTX COMMIT] ok=" << ok << " affected=" << aff << " commit=" << committed << "\n";
+            std::cout << "[SUBTX COMMIT] ok=" << ok
+                << " affected=" << aff
+                << " commit=" << committed << "\n";
         }
     }
 
     {
         int limit = 10, off = 0;
-        auto rows = co_await tx.select_reflect<UserRow>(
-            "SELECT id, name AS username, password, roles, tags FROM users_r ORDER BY id LIMIT $1 OFFSET $2",
+        auto rows = co_await tx.query_reflect_expected<UserRow>(
+            "SELECT id, name AS username, password, roles, tags FROM users_r "
+            "ORDER BY id LIMIT $1 OFFSET $2",
             limit, off);
-        std::cout << "[SELECT PAGE] n=" << rows.size() << "\n";
-        for (auto& u : rows)
+
+        if (!rows)
         {
-            std::cout << "  id=" << u.id << " name=" << u.username
-                << " pwd=" << (u.password ? *u.password : "<NULL>") << " roles=[";
-            for (size_t i = 0; i < u.roles.size(); ++i) std::cout << u.roles[i] << (i + 1 < u.roles.size() ? "," : "");
-            std::cout << "] tags=[";
-            for (size_t i = 0; i < u.tags.size(); ++i) std::cout << u.tags[i] << (i + 1 < u.tags.size() ? "," : "");
-            std::cout << "]\n";
+            const auto& e = rows.error();
+            std::cout << "[SELECT PAGE] fail "
+                << usub::pg::toString(e.code)
+                << " msg=" << e.error << "\n";
+        }
+        else
+        {
+            std::cout << "[SELECT PAGE] n=" << rows->size() << "\n";
+            for (auto& u : *rows)
+            {
+                std::cout << "  id=" << u.id << " name=" << u.username
+                    << " pwd=" << (u.password ? *u.password : "<NULL>")
+                    << " roles=[";
+                for (size_t i = 0; i < u.roles.size(); ++i)
+                    std::cout << u.roles[i] << (i + 1 < u.roles.size() ? "," : "");
+                std::cout << "] tags=[";
+                for (size_t i = 0; i < u.tags.size(); ++i)
+                    std::cout << u.tags[i] << (i + 1 < u.tags.size() ? "," : "");
+                std::cout << "]\n";
+            }
         }
     }
 
     {
         std::optional<std::string> patt = std::string("%bo%");
         std::optional<int64_t> min_id = int64_t{0};
-        auto rows = co_await tx.select_reflect<UserRow>(
+        auto rows = co_await tx.query_reflect_expected<UserRow>(
             "SELECT id, name AS username, password, roles, tags FROM users_r "
-            "WHERE ($1::text IS NULL OR name ILIKE $1) AND ($2::int8 IS NULL OR id >= $2) ORDER BY id",
+            "WHERE ($1::text IS NULL OR name ILIKE $1) "
+            "AND ($2::int8 IS NULL OR id >= $2) "
+            "ORDER BY id",
             patt, min_id);
-        std::cout << "[FILTERED] n=" << rows.size() << "\n";
+
+        if (!rows)
+        {
+            const auto& e = rows.error();
+            std::cout << "[FILTERED] fail "
+                << usub::pg::toString(e.code)
+                << " msg=" << e.error << "\n";
+        }
+        else
+        {
+            std::cout << "[FILTERED] n=" << rows->size() << "\n";
+        }
     }
 
     {
-        Upd u;
-        u.name = "Kirill-upd";
-        u.id = inserted_id_1 > 0 ? inserted_id_1 : 1;
-        auto upd = co_await tx.query_reflect("UPDATE users_r SET name = $1 WHERE id = $2", u);
-        std::cout << "[TX UPDATE] ok=" << upd.ok << " affected=" << upd.rows_affected << "\n";
+        Upd u{
+            .name = "Kirill-upd",
+            .id = inserted_id_1 > 0 ? inserted_id_1 : 1
+        };
 
-        auto check = co_await tx.select_one_reflect<UserRow>(
-            "SELECT id, name AS username, password, roles, tags FROM users_r WHERE id = $1", u.id);
-        std::cout << "[TX CHECK] name=" << (check ? check->username : "<none>") << "\n";
+        auto upd = co_await tx.query_reflect(
+            "UPDATE users_r SET name = $1 WHERE id = $2", u);
+        std::cout << "[TX UPDATE] ok=" << upd.ok
+            << " affected=" << upd.rows_affected << "\n";
+
+        auto check = co_await tx.query_reflect_expected_one<UserRow>(
+            "SELECT id, name AS username, password, roles, tags FROM users_r WHERE id = $1",
+            u.id);
+
+        std::cout << "[TX CHECK] name="
+            << (check ? check->username : std::string("<none>")) << "\n";
     }
 
     {
         std::vector<int64_t> ids;
         if (inserted_id_1 > 0) ids.push_back(inserted_id_1);
         if (inserted_id_2 > 0) ids.push_back(inserted_id_2);
-        auto rows = co_await tx.select_reflect<UserRow>(
-            "SELECT id, name AS username, password, roles, tags FROM users_r WHERE id = ANY($1::int8[]) ORDER BY id",
+
+        auto rows = co_await tx.query_reflect_expected<UserRow>(
+            "SELECT id, name AS username, password, roles, tags "
+            "FROM users_r WHERE id = ANY($1::int8[]) ORDER BY id",
             ids);
-        std::cout << "[ANY(ids)] n=" << rows.size() << "\n";
+
+        if (!rows)
+        {
+            const auto& e = rows.error();
+            std::cout << "[ANY(ids)] fail "
+                << usub::pg::toString(e.code)
+                << " msg=" << e.error << "\n";
+        }
+        else
+        {
+            std::cout << "[ANY(ids)] n=" << rows->size() << "\n";
+        }
     }
 
     if (!(co_await tx.commit())) std::cout << "[TX] commit failed\n";
@@ -1166,7 +1234,7 @@ usub::uvent::task::Awaitable<void> expected_reflect_example(usub::pg::PgPool& po
         {
             const auto& e = one.error();
             std::cout << "[EXP/ONE Nobody] fail code=" << toString(e.code)
-                << " msg=" << e.error << "\n"; // ожидаем "no rows"
+                << " msg=" << e.error << "\n";
         }
         else
         {
@@ -1234,18 +1302,27 @@ usub::uvent::task::Awaitable<void> expected_reflect_example(usub::pg::PgPool& po
 
 enum class RoleKind { admin, user, guest };
 
-namespace usub::pg::detail::upq
+enum class RoleKind2 { admin1, user1, guest1 };
+
+template <>
+struct usub::pg::detail::upq::enum_meta<RoleKind>
 {
-    template <>
-    struct enum_meta<RoleKind>
-    {
-        static constexpr std::pair<RoleKind, std::string_view> mapping[] = {
-            {RoleKind::admin, "admin"},
-            {RoleKind::user, "user"},
-            {RoleKind::guest, "guest"},
-        };
-    };
-}
+    static constexpr auto mapping = enumerate<
+        RoleKind::admin,
+        RoleKind::user,
+        RoleKind::guest
+    >();
+};
+
+template <>
+struct usub::pg::detail::upq::enum_meta<RoleKind2>
+{
+    static constexpr auto mapping = enumerate<
+        RoleKind2::admin1,
+        RoleKind2::user1,
+        RoleKind2::guest1
+    >();
+};
 
 struct EnumIns
 {
