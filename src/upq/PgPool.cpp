@@ -8,7 +8,7 @@ namespace usub::pg
                    std::string user,
                    std::string db,
                    std::string password,
-                   size_t max_pool_size)
+                   size_t max_pool_size, int retries_on_connection_failed)
         : host_(std::move(host))
           , port_(std::move(port))
           , user_(std::move(user))
@@ -17,20 +17,21 @@ namespace usub::pg
           , idle_(max_pool_size)
           , max_pool_(max_pool_size)
           , live_count_(0)
-          , stats_{}
+          , stats_{},
+          retries_on_connection_failed_(retries_on_connection_failed)
     {
     }
 
     PgPool::~PgPool() = default;
 
-    usub::uvent::task::Awaitable<std::shared_ptr<PgConnectionLibpq>>
+    usub::uvent::task::Awaitable<std::expected<std::shared_ptr<PgConnectionLibpq>, PgOpError>>
     PgPool::acquire_connection()
     {
         using namespace std::chrono_literals;
 
         std::shared_ptr<PgConnectionLibpq> conn;
 
-        for (;;)
+        for (int i = 0; i < retries_on_connection_failed_; ++i)
         {
             if (this->idle_.try_dequeue(conn))
             {
@@ -39,7 +40,7 @@ namespace usub::pg
                     this->live_count_.fetch_sub(1, std::memory_order_relaxed);
                     continue;
                 }
-                co_return conn;
+                co_return std::expected<std::shared_ptr<PgConnectionLibpq>, PgOpError>{std::in_place, std::move(conn)};
             }
 
             size_t cur_live = this->live_count_.load(std::memory_order_relaxed);
@@ -68,13 +69,21 @@ namespace usub::pg
                     }
                     else
                     {
-                        co_return newConn;
+                        co_return std::expected<std::shared_ptr<PgConnectionLibpq>, PgOpError>{
+                            std::in_place, std::move(newConn)
+                        };
                     }
                 }
             }
 
             co_await usub::uvent::system::this_coroutine::sleep_for(100us);
         }
+
+        co_return std::unexpected(PgOpError{
+            PgErrorCode::TooManyConnections,
+            "Too many opened connections or connection failed after retries",
+            {}
+        });
     }
 
     void PgPool::release_connection(std::shared_ptr<PgConnectionLibpq> conn)

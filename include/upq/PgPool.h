@@ -24,11 +24,12 @@ namespace usub::pg
                std::string user,
                std::string db,
                std::string password,
-               size_t max_pool_size = 32);
+               size_t max_pool_size = 32,
+               int retries_on_connection_failed = 5);
 
         ~PgPool();
 
-        usub::uvent::task::Awaitable<std::shared_ptr<PgConnectionLibpq>>
+        usub::uvent::task::Awaitable<std::expected<std::shared_ptr<PgConnectionLibpq>, PgOpError>>
         acquire_connection();
 
         void release_connection(std::shared_ptr<PgConnectionLibpq> conn);
@@ -71,7 +72,8 @@ namespace usub::pg
         {
             QueryResult qr = co_await query_on(conn, sql);
             if (!qr.ok)
-                co_return std::unexpected(PgOpError{qr.code, std::move(qr.error), std::move(qr.err_detail)});
+                co_return std::unexpected(PgOpError{qr.code, qr.error, qr.err_detail});
+
             auto rows = co_await conn->exec_simple_query_nonblocking<T>(sql);
             co_return std::expected<std::vector<T>, PgOpError>{std::in_place, std::move(rows)};
         }
@@ -83,7 +85,7 @@ namespace usub::pg
         {
             QueryResult qr = co_await query_on(conn, sql);
             if (!qr.ok)
-                co_return std::unexpected(PgOpError{qr.code, std::move(qr.error), std::move(qr.err_detail)});
+                co_return std::unexpected(PgOpError{qr.code, qr.error, qr.err_detail});
 
             auto row = co_await conn->exec_simple_query_one_nonblocking<T>(sql);
             if (!row)
@@ -95,7 +97,11 @@ namespace usub::pg
         usub::uvent::task::Awaitable<std::expected<std::vector<T>, PgOpError>>
         query_reflect_expected(const std::string& sql)
         {
-            auto conn = co_await acquire_connection();
+            auto c = co_await acquire_connection();
+            if (!c)
+                co_return std::unexpected(c.error());
+
+            auto conn = *c;
             auto res = co_await query_on_reflect_expected<T>(conn, sql);
             co_await release_connection_async(conn);
             co_return res;
@@ -105,7 +111,11 @@ namespace usub::pg
         usub::uvent::task::Awaitable<std::expected<T, PgOpError>>
         query_reflect_expected_one(const std::string& sql)
         {
-            auto conn = co_await acquire_connection();
+            auto c = co_await acquire_connection();
+            if (!c)
+                co_return std::unexpected(c.error());
+
+            auto conn = *c;
             auto res = co_await query_on_reflect_expected_one<T>(conn, sql);
             co_await release_connection_async(conn);
             co_return res;
@@ -136,7 +146,7 @@ namespace usub::pg
         {
             QueryResult qr = co_await query_on(conn, sql, std::forward<Args>(args)...);
             if (!qr.ok)
-                co_return std::unexpected(PgOpError{qr.code, std::move(qr.error), std::move(qr.err_detail)});
+                co_return std::unexpected(PgOpError{qr.code, qr.error, qr.err_detail});
 
             auto rows = co_await conn->exec_param_query_nonblocking<T>(
                 sql, std::forward<Args>(args)...);
@@ -150,7 +160,7 @@ namespace usub::pg
         {
             QueryResult qr = co_await query_on(conn, sql, std::forward<Args>(args)...);
             if (!qr.ok)
-                co_return std::unexpected(PgOpError{qr.code, std::move(qr.error), std::move(qr.err_detail)});
+                co_return std::unexpected(PgOpError{qr.code, qr.error, qr.err_detail});
 
             auto row = co_await conn->exec_param_query_one_nonblocking<T>(
                 sql, std::forward<Args>(args)...);
@@ -163,7 +173,11 @@ namespace usub::pg
         usub::uvent::task::Awaitable<std::expected<std::vector<T>, PgOpError>>
         query_reflect_expected(const std::string& sql, Args&&... args)
         {
-            auto conn = co_await acquire_connection();
+            auto c = co_await acquire_connection();
+            if (!c)
+                co_return std::unexpected(c.error());
+
+            auto conn = *c;
             auto res = co_await query_on_reflect_expected<T>(conn, sql, std::forward<Args>(args)...);
             co_await release_connection_async(conn);
             co_return res;
@@ -173,7 +187,11 @@ namespace usub::pg
         usub::uvent::task::Awaitable<std::expected<T, PgOpError>>
         query_reflect_expected_one(const std::string& sql, Args&&... args)
         {
-            auto conn = co_await acquire_connection();
+            auto c = co_await acquire_connection();
+            if (!c)
+                co_return std::unexpected(c.error());
+
+            auto conn = *c;
             auto res = co_await query_on_reflect_expected_one<T>(conn, sql, std::forward<Args>(args)...);
             co_await release_connection_async(conn);
             co_return res;
@@ -212,6 +230,7 @@ namespace usub::pg
         std::string user_;
         std::string db_;
         std::string password_;
+        int retries_on_connection_failed_;
 
         usub::queue::concurrent::MPMCQueue<std::shared_ptr<PgConnectionLibpq>> idle_;
 
@@ -220,6 +239,8 @@ namespace usub::pg
 
         HealthStats stats_;
     };
+
+    // ----------------- impl -----------------
 
     template <typename... Args>
     usub::uvent::task::Awaitable<QueryResult>
@@ -256,7 +277,20 @@ namespace usub::pg
     usub::uvent::task::Awaitable<QueryResult>
     PgPool::query_awaitable(const std::string& sql, Args&&... args)
     {
-        auto conn = co_await acquire_connection();
+        auto c = co_await acquire_connection();
+        if (!c)
+        {
+            const auto& e = c.error();
+            QueryResult bad;
+            bad.ok = false;
+            bad.code = e.code;
+            bad.error = e.error;
+            bad.err_detail = e.err_detail;
+            bad.rows_valid = false;
+            co_return bad;
+        }
+
+        auto conn = *c;
 
         QueryResult qr = co_await query_on(
             conn,
@@ -296,7 +330,11 @@ namespace usub::pg
     usub::uvent::task::Awaitable<std::vector<T>>
     PgPool::query_reflect(const std::string& sql)
     {
-        auto conn = co_await acquire_connection();
+        auto c = co_await acquire_connection();
+        if (!c)
+            co_return std::vector<T>{};
+
+        auto conn = *c;
         auto rows = co_await query_on_reflect<T>(conn, sql);
         co_await release_connection_async(conn);
         co_return rows;
@@ -306,7 +344,11 @@ namespace usub::pg
     usub::uvent::task::Awaitable<std::optional<T>>
     PgPool::query_reflect_one(const std::string& sql)
     {
-        auto conn = co_await acquire_connection();
+        auto c = co_await acquire_connection();
+        if (!c)
+            co_return std::optional<T>{};
+
+        auto conn = *c;
         auto row = co_await query_on_reflect_one<T>(conn, sql);
         co_await release_connection_async(conn);
         co_return row;
@@ -342,7 +384,11 @@ namespace usub::pg
     usub::uvent::task::Awaitable<std::vector<T>>
     PgPool::query_reflect(const std::string& sql, Args&&... args)
     {
-        auto conn = co_await acquire_connection();
+        auto c = co_await acquire_connection();
+        if (!c)
+            co_return std::vector<T>{};
+
+        auto conn = *c;
         auto rows = co_await query_on_reflect<T>(
             conn, sql, std::forward<Args>(args)...);
         co_await release_connection_async(conn);
@@ -353,7 +399,11 @@ namespace usub::pg
     usub::uvent::task::Awaitable<std::optional<T>>
     PgPool::query_reflect_one(const std::string& sql, Args&&... args)
     {
-        auto conn = co_await acquire_connection();
+        auto c = co_await acquire_connection();
+        if (!c)
+            co_return std::optional<T>{};
+
+        auto conn = *c;
         auto row = co_await query_on_reflect_one<T>(
             conn, sql, std::forward<Args>(args)...);
         co_await release_connection_async(conn);
@@ -384,7 +434,20 @@ namespace usub::pg
     usub::uvent::task::Awaitable<QueryResult>
     PgPool::exec_reflect(const std::string& sql, const Obj& obj)
     {
-        auto conn = co_await acquire_connection();
+        auto c = co_await acquire_connection();
+        if (!c)
+        {
+            const auto& e = c.error();
+            QueryResult bad;
+            bad.ok = false;
+            bad.code = e.code;
+            bad.error = e.error;
+            bad.err_detail = e.err_detail;
+            bad.rows_valid = false;
+            co_return bad;
+        }
+
+        auto conn = *c;
         auto qr = co_await exec_reflect_on(conn, sql, obj);
         co_await release_connection_async(conn);
         co_return qr;

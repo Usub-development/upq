@@ -224,7 +224,6 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
             }
         }
 
-        // insert #1 (aggregate)
         {
             NewUser u{};
             u.name = "Alice";
@@ -244,7 +243,6 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
             std::cout << "[OK] inserted rows: " << r.rows_affected << "\n";
         }
 
-        // insert #2 (tuple)
         {
             std::string name = "Bob";
             std::optional<std::string> pass = std::make_optional<std::string>("x");
@@ -263,7 +261,6 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
             std::cout << "[OK] inserted rows (tuple): " << r2.rows_affected << "\n";
         }
 
-        // dump all
         {
             auto rows = co_await pool.query_reflect<UserRow>(
                 "SELECT id, password, name AS username, roles, tags FROM users_reflect ORDER BY id;"
@@ -298,7 +295,6 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
             }
         }
 
-        // ONE by literal
         {
             auto one = co_await pool.query_reflect_one<UserRow>(
                 "SELECT id, name AS username, password, roles, tags "
@@ -308,7 +304,6 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
             else std::cout << "[ONE] not found\n";
         }
 
-        // 1) BY-ID
         {
             int64_t qid = 1;
             auto one = co_await pool.query_reflect_one<UserRow>(
@@ -319,7 +314,6 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
             std::cout << "[BY-ID] " << (one ? one->username : "<none>") << "\n";
         }
 
-        // 2) BY-NAME
         {
             std::string q_name = "Alice";
             auto one = co_await pool.query_reflect_one<UserRow>(
@@ -330,7 +324,6 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
             std::cout << "[BY-NAME] " << (one ? one->username : "<none>") << "\n";
         }
 
-        // 3) TAGS-OVERLAP
         {
             std::vector<std::string> need_tags{"admin", "labs"};
             auto rows = co_await pool.query_reflect<UserRow>(
@@ -343,7 +336,6 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
             std::cout << "[TAGS-OVERLAP] n=" << rows.size() << "\n";
         }
 
-        // 4) ROLES-OVERLAP
         {
             std::array<int, 3> role_set{1, 2, 5};
             auto rows = co_await pool.query_reflect<UserRow>(
@@ -356,7 +348,6 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
             std::cout << "[ROLES-OVERLAP] n=" << rows.size() << "\n";
         }
 
-        // 5) PWD=NULL
         {
             std::optional<std::string> pass = std::nullopt;
             auto rows = co_await pool.query_reflect<UserRow>(
@@ -369,7 +360,6 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
             std::cout << "[PWD=NULL] n=" << rows.size() << "\n";
         }
 
-        // 6) ANY(ids)
         {
             std::vector<int64_t> ids{1, 2, 3, 4};
             auto rows = co_await pool.query_reflect<UserRow>(
@@ -382,7 +372,6 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
             std::cout << "[ANY(ids)] n=" << rows.size() << "\n";
         }
 
-        // 7) PAGE
         {
             int limit = 2, offset = 0;
             auto page = co_await pool.query_reflect<UserRow>(
@@ -395,7 +384,6 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
                 << " (limit=" << limit << ", off=" << offset << ")\n";
         }
 
-        // 8) UPDATE … RETURNING -> Ret (CTE + fallback)
         {
             Upd u{.name = "Alice-upd", .id = 1};
 
@@ -422,7 +410,6 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool& pool)
             }
         }
 
-        // 9) MIXED
         {
             std::optional<std::string> patt = std::string("%ali%");
             std::optional<int64_t> min_id = int64_t{0};
@@ -494,7 +481,6 @@ usub::uvent::task::Awaitable<void> tx_reflect_example(usub::pg::PgPool& pool)
             co_return;
         }
 
-        // INSERT ... RETURNING -> expected_one
         auto ins_ret = co_await tx.query_reflect_expected_one<Ret>(
             "WITH ins AS (INSERT INTO users_r(name,password,roles,tags)"
             " VALUES($1,$2,$3,$4) RETURNING id, name) "
@@ -711,11 +697,11 @@ task::Awaitable<void> test_array_inserts(usub::pg::PgPool& pool)
         auto res = co_await pool.query_awaitable(R"SQL(
             CREATE TABLE IF NOT EXISTS array_test_multi (
                 id        bigserial PRIMARY KEY,
-                a_int4_1  int4[]  NOT NULL,
-                a_int4_2  int4[]  NOT NULL,
+                a_int4_1  int4[]   NOT NULL,
+                a_int4_2  int4[]   NOT NULL,
                 a_float8  float8[] NOT NULL,
-                a_bool    bool[]  NOT NULL,
-                a_text    text[]  NOT NULL,
+                a_bool    bool[]   NOT NULL,
+                a_text    text[]   NOT NULL,
                 comment   text
             );
         )SQL");
@@ -735,11 +721,11 @@ task::Awaitable<void> test_array_inserts(usub::pg::PgPool& pool)
             R"(INSERT INTO array_test_multi
                (a_int4_1, a_int4_2, a_float8, a_bool, a_text, comment)
                VALUES ($1, $2, $3, $4, $5, $6);)",
-            ai, // -> int4[]
-            ci, // -> int4[]
-            ld, // -> float8[]
-            vb, // -> bool[]  (NULL saved)
-            il, // -> text[]
+            ai,
+            ci,
+            ld,
+            vb,
+            il,
             "multi-insert"
         );
         if (!ins.ok)
@@ -804,11 +790,16 @@ struct MyNotifyHandler
 
 task::Awaitable<void> spawn_listener(usub::pg::PgPool& pool)
 {
-    auto conn = co_await pool.acquire_connection();
+    auto c = co_await pool.acquire_connection();
+    if (!c || !*c || !(*c)->connected())
+    {
+        co_return;
+    }
+
     using Listener = usub::pg::PgNotificationListener<MyNotifyHandler>;
     auto listener = std::make_shared<Listener>(
         "events",
-        conn
+        *c
     );
 
     listener->setHandler(MyNotifyHandler{&pool});
@@ -845,10 +836,15 @@ struct RiskAlerter : usub::pg::IPgNotifyHandler
 
 usub::uvent::task::Awaitable<void> spawn_listener_multiplexer(usub::pg::PgPool& pool)
 {
-    auto conn = co_await pool.acquire_connection();
+    auto c = co_await pool.acquire_connection();
+    if (!c || !*c || !(*c)->connected())
+    {
+        std::cout << "Failed to get connection for multiplexer\n";
+        co_return;
+    }
 
     usub::pg::PgNotificationMultiplexer mux(
-        conn,
+        *c,
         pool.host(),
         pool.port(),
         pool.user(),
@@ -895,12 +891,13 @@ task::Awaitable<void> massive_ops_example(usub::pg::PgPool& pool)
     }
 
     {
-        auto conn = co_await pool.acquire_connection();
-        if (!conn || !conn->connected())
+        auto c = co_await pool.acquire_connection();
+        if (!c || !*c || !(*c)->connected())
         {
             std::cout << "[ERROR] no conn for COPY IN" << std::endl;
             co_return;
         }
+        auto conn = *c;
 
         {
             usub::pg::PgCopyResult st = co_await conn->copy_in_start(
@@ -950,12 +947,13 @@ task::Awaitable<void> massive_ops_example(usub::pg::PgPool& pool)
     }
 
     {
-        auto conn = co_await pool.acquire_connection();
-        if (!conn || !conn->connected())
+        auto c = co_await pool.acquire_connection();
+        if (!c || !*c || !(*c)->connected())
         {
             std::cout << "[ERROR] no conn for COPY OUT" << std::endl;
             co_return;
         }
+        auto conn = *c;
 
         {
             usub::pg::PgCopyResult st = co_await conn->copy_out_start(
@@ -993,12 +991,13 @@ task::Awaitable<void> massive_ops_example(usub::pg::PgPool& pool)
     }
 
     {
-        auto conn = co_await pool.acquire_connection();
-        if (!conn || !conn->connected())
+        auto c = co_await pool.acquire_connection();
+        if (!c || !*c || !(*c)->connected())
         {
             std::cout << "[ERROR] no conn for cursor" << std::endl;
             co_return;
         }
+        auto conn = *c;
 
         std::string cursor_name = conn->make_cursor_name();
 
@@ -1123,7 +1122,7 @@ usub::uvent::task::Awaitable<void> decode_fail_example(usub::pg::PgPool& pool)
             CREATE TABLE users_r (
                 id       BIGSERIAL PRIMARY KEY,
                 name     TEXT,
-                balance  TEXT    -- важно: TEXT, чтобы decode сломался
+                balance  TEXT
             );
         )SQL");
         if (!r.ok) co_return;
@@ -1455,13 +1454,13 @@ int main()
 
     usub::Uvent uvent(1);
 
-    auto pool = usub::pg::PgPool(
-        "localhost", // host
-        "12432", // port
-        "postgres", // user
-        "postgres", // db
-        "password", // password
-        /*max_pool_size*/ 32
+    usub::pg::PgPool pool(
+        "localhost",
+        "12432",
+        "postgres",
+        "postgres",
+        "password",
+        32
     );
 
     uvent.for_each_thread([&](int threadIndex, thread::ThreadLocalStorage* tls)

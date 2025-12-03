@@ -7,9 +7,8 @@ namespace usub::pg
     {
         bool any_opts =
             (cfg.isolation != TxIsolationLevel::Default) ||
-            (cfg.read_only) ||
-            (cfg.deferrable) ||
-            (!cfg.read_only);
+            cfg.read_only ||
+            cfg.deferrable;
 
         if (!any_opts) return "BEGIN";
 
@@ -17,13 +16,18 @@ namespace usub::pg
 
         switch (cfg.isolation)
         {
-        case TxIsolationLevel::ReadCommitted: out += " ISOLATION LEVEL READ COMMITTED";
+        case TxIsolationLevel::ReadCommitted:
+            out += " ISOLATION LEVEL READ COMMITTED";
             break;
-        case TxIsolationLevel::RepeatableRead: out += " ISOLATION LEVEL REPEATABLE READ";
+        case TxIsolationLevel::RepeatableRead:
+            out += " ISOLATION LEVEL REPEATABLE READ";
             break;
-        case TxIsolationLevel::Serializable: out += " ISOLATION LEVEL SERIALIZABLE";
+        case TxIsolationLevel::Serializable:
+            out += " ISOLATION LEVEL SERIALIZABLE";
             break;
-        case TxIsolationLevel::Default: default: break;
+        case TxIsolationLevel::Default:
+        default:
+            break;
         }
 
         out += (cfg.read_only ? " READ ONLY" : " READ WRITE");
@@ -44,7 +48,14 @@ namespace usub::pg
     {
         if (active_) co_return true;
 
-        conn_ = co_await pool_->acquire_connection();
+        auto c = co_await pool_->acquire_connection();
+        if (!c)
+        {
+            conn_.reset();
+            co_return false;
+        }
+
+        conn_ = *c;
         if (!conn_ || !conn_->connected())
         {
             conn_.reset();

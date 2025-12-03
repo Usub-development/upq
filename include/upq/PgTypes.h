@@ -43,6 +43,7 @@ namespace usub::pg
         ServerError,
         AuthFailed,
         AwaitCanceled,
+        TooManyConnections,
         Unknown
     };
 
