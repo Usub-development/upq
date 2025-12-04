@@ -17,8 +17,8 @@ namespace usub::pg
           , idle_(max_pool_size)
           , max_pool_(max_pool_size)
           , live_count_(0)
-          , stats_{},
-          retries_on_connection_failed_(retries_on_connection_failed)
+          , stats_{}
+          , retries_on_connection_failed_(retries_on_connection_failed)
     {
     }
 
@@ -35,7 +35,7 @@ namespace usub::pg
         {
             if (this->idle_.try_dequeue(conn))
             {
-                if (!conn->connected())
+                if (!conn->connected() || !conn->is_idle())
                 {
                     this->live_count_.fetch_sub(1, std::memory_order_relaxed);
                     continue;
@@ -91,13 +91,7 @@ namespace usub::pg
         if (!conn)
             return;
 
-        if (!conn->connected())
-        {
-            this->live_count_.fetch_sub(1, std::memory_order_relaxed);
-            return;
-        }
-
-        if (!conn->is_idle())
+        if (!conn->connected() || !conn->is_idle())
         {
             this->live_count_.fetch_sub(1, std::memory_order_relaxed);
             return;
@@ -112,7 +106,12 @@ namespace usub::pg
     usub::uvent::task::Awaitable<void>
     PgPool::release_connection_async(std::shared_ptr<PgConnectionLibpq> conn)
     {
-        if (!conn || !conn->connected())
+        if (!conn)
+        {
+            co_return;
+        }
+
+        if (!conn->connected())
         {
             this->live_count_.fetch_sub(1, std::memory_order_relaxed);
             co_return;
@@ -122,6 +121,12 @@ namespace usub::pg
         if (pumped)
         {
             (void)conn->drain_all_results();
+        }
+
+        if (!conn->connected() || !conn->is_idle())
+        {
+            this->live_count_.fetch_sub(1, std::memory_order_relaxed);
+            co_return;
         }
 
         if (!this->idle_.try_enqueue(conn))

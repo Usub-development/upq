@@ -36,13 +36,21 @@ namespace usub::pg
     }
 
     PgTransaction::PgTransaction(PgPool* pool, PgTransactionConfig cfg)
-        : pool_(pool), cfg_(cfg)
+        : pool_(pool)
+          , cfg_(cfg)
     {
+        // хак: для read_only транзакций без deferrable работаем без BEGIN/COMMIT,
+        // просто удерживаем коннект и шлём запросы в автокоммите.
+        if (cfg_.read_only && !cfg_.deferrable)
+        {
+            emulate_readonly_autocommit_ = true;
+        }
     }
 
     PgTransaction::~PgTransaction()
     {
-        if (this->conn_) {
+        if (this->conn_)
+        {
             this->pool_->mark_dead(this->conn_);
             this->conn_.reset();
         }
@@ -66,11 +74,34 @@ namespace usub::pg
             co_return false;
         }
 
+        // read-only режим без реальной транзакции — просто держим коннект
+        if (emulate_readonly_autocommit_)
+        {
+            active_ = true;
+            committed_ = false;
+            rolled_back_ = false;
+            co_return true;
+        }
+
         const std::string bsql = build_begin_sql(cfg_);
         QueryResult r_begin = co_await pool_->query_on(conn_, bsql);
         if (!r_begin.ok)
         {
-            co_await pool_->release_connection_async(conn_);
+            std::cout
+                << "BEGIN failed: sql=[" << bsql << "] "
+                << "code=" << toString(r_begin.code)
+                << " sqlstate=" << r_begin.err_detail.sqlstate
+                << " msg=" << r_begin.error << std::endl;
+
+            if (is_fatal_connection_error(r_begin))
+            {
+                pool_->mark_dead(conn_);
+            }
+            else
+            {
+                co_await pool_->release_connection_async(conn_);
+            }
+
             conn_.reset();
             active_ = false;
             committed_ = false;
@@ -95,19 +126,37 @@ namespace usub::pg
             active_ = false;
             if (conn_)
             {
-                co_await pool_->release_connection_async(conn_);
+                pool_->mark_dead(conn_);
                 conn_.reset();
             }
             co_return false;
         }
 
+        if (emulate_readonly_autocommit_)
+        {
+            committed_ = true;
+            rolled_back_ = false;
+            active_ = false;
+            co_await pool_->release_connection_async(conn_);
+            conn_.reset();
+            co_return true;
+        }
+
         QueryResult r_commit = co_await pool_->query_on(conn_, "COMMIT");
         if (!r_commit.ok)
         {
+            if (is_fatal_connection_error(r_commit))
+            {
+                pool_->mark_dead(conn_);
+            }
+            else
+            {
+                co_await pool_->release_connection_async(conn_);
+            }
+
             committed_ = false;
             rolled_back_ = true;
             active_ = false;
-            co_await pool_->release_connection_async(conn_);
             conn_.reset();
             co_return false;
         }
@@ -124,10 +173,27 @@ namespace usub::pg
     {
         if (!active_) co_return;
 
+        if (emulate_readonly_autocommit_)
+        {
+            committed_ = false;
+            rolled_back_ = true;
+            active_ = false;
+            if (conn_)
+            {
+                co_await pool_->release_connection_async(conn_);
+                conn_.reset();
+            }
+            co_return;
+        }
+
         if (conn_ && conn_->connected())
         {
             QueryResult r_rb = co_await pool_->query_on(conn_, "ROLLBACK");
-            (void)r_rb;
+            if (is_fatal_connection_error(r_rb))
+            {
+                pool_->mark_dead(conn_);
+                conn_.reset();
+            }
         }
 
         committed_ = false;
@@ -160,10 +226,27 @@ namespace usub::pg
     {
         if (!active_) co_return;
 
+        if (emulate_readonly_autocommit_)
+        {
+            committed_ = false;
+            rolled_back_ = true;
+            active_ = false;
+            if (conn_)
+            {
+                co_await pool_->release_connection_async(conn_);
+                conn_.reset();
+            }
+            co_return;
+        }
+
         if (conn_ && conn_->connected())
         {
             QueryResult r_rb = co_await pool_->query_on(conn_, "ABORT");
-            (void)r_rb;
+            if (is_fatal_connection_error(r_rb))
+            {
+                pool_->mark_dead(conn_);
+                conn_.reset();
+            }
         }
 
         committed_ = false;
@@ -181,6 +264,15 @@ namespace usub::pg
     {
         if (!active_ || !conn_ || !conn_->connected()) co_return false;
         QueryResult r = co_await pool_->query_on(conn_, sql);
+        if (is_fatal_connection_error(r))
+        {
+            pool_->mark_dead(conn_);
+            conn_.reset();
+            active_ = false;
+            rolled_back_ = true;
+            committed_ = false;
+            co_return false;
+        }
         co_return r.ok;
     }
 
@@ -200,18 +292,28 @@ namespace usub::pg
     {
     }
 
-    PgTransaction::PgSubtransaction::~PgSubtransaction()
-    {
-    }
+    PgTransaction::PgSubtransaction::~PgSubtransaction() = default;
 
     usub::uvent::task::Awaitable<bool>
     PgTransaction::PgSubtransaction::begin()
     {
         if (!parent_.active_ || !parent_.conn_ || !parent_.conn_->connected()) co_return false;
+        if (parent_.emulate_readonly_autocommit_) co_return false; // savepoint'ы тут не поддерживаем
 
         std::string cmd = "SAVEPOINT " + sp_name_;
         QueryResult r = co_await parent_.pool_->query_on(parent_.conn_, cmd);
-        if (!r.ok) co_return false;
+        if (!r.ok)
+        {
+            if (is_fatal_connection_error(r))
+            {
+                parent_.pool_->mark_dead(parent_.conn_);
+                parent_.conn_.reset();
+                parent_.active_ = false;
+                parent_.rolled_back_ = true;
+                parent_.committed_ = false;
+            }
+            co_return false;
+        }
 
         active_ = true;
         committed_ = false;
@@ -223,7 +325,6 @@ namespace usub::pg
     PgTransaction::PgSubtransaction::commit()
     {
         if (!active_) co_return false;
-
         if (!parent_.conn_ || !parent_.conn_->connected())
         {
             active_ = false;
@@ -231,11 +332,20 @@ namespace usub::pg
             rolled_back_ = true;
             co_return false;
         }
+        if (parent_.emulate_readonly_autocommit_) co_return false;
 
         std::string cmd = "RELEASE SAVEPOINT " + sp_name_;
         QueryResult r = co_await parent_.pool_->query_on(parent_.conn_, cmd);
         if (!r.ok)
         {
+            if (is_fatal_connection_error(r))
+            {
+                parent_.pool_->mark_dead(parent_.conn_);
+                parent_.conn_.reset();
+                parent_.active_ = false;
+                parent_.rolled_back_ = true;
+                parent_.committed_ = false;
+            }
             active_ = false;
             committed_ = false;
             rolled_back_ = true;
@@ -252,12 +362,26 @@ namespace usub::pg
     PgTransaction::PgSubtransaction::rollback()
     {
         if (!active_) co_return;
+        if (parent_.emulate_readonly_autocommit_)
+        {
+            active_ = false;
+            committed_ = false;
+            rolled_back_ = true;
+            co_return;
+        }
 
         if (parent_.conn_ && parent_.conn_->connected())
         {
             std::string cmd = "ROLLBACK TO SAVEPOINT " + sp_name_;
             QueryResult r = co_await parent_.pool_->query_on(parent_.conn_, cmd);
-            (void)r;
+            if (is_fatal_connection_error(r))
+            {
+                parent_.pool_->mark_dead(parent_.conn_);
+                parent_.conn_.reset();
+                parent_.active_ = false;
+                parent_.rolled_back_ = true;
+                parent_.committed_ = false;
+            }
         }
 
         active_ = false;

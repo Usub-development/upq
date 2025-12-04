@@ -485,9 +485,6 @@ namespace usub::pg
         usub::uvent::task::Awaitable<std::vector<T>>
         exec_param_query_nonblocking(const std::string& sql, Args&&... args)
         {
-            using Fn = usub::uvent::task::Awaitable<usub::pg::QueryResult>
-                (PgConnectionLibpq::*)(const std::string&, Args&&...);
-
             usub::pg::QueryResult qr = co_await this->exec_param_query_nonblocking(
                 sql, std::forward<Args>(args)...);
 
@@ -613,6 +610,7 @@ namespace usub::pg
         {
             out.code = PgErrorCode::SocketReadFailed;
             out.error = PQerrorMessage(conn_);
+            connected_ = false;
             co_return out;
         }
 
@@ -625,6 +623,7 @@ namespace usub::pg
             {
                 out.code = PgErrorCode::SocketReadFailed;
                 out.error = PQerrorMessage(conn_);
+                connected_ = false;
                 co_return out;
             }
             co_await wait_writable();
@@ -637,6 +636,7 @@ namespace usub::pg
             {
                 out.code = PgErrorCode::SocketReadFailed;
                 out.error = PQerrorMessage(conn_);
+                connected_ = false;
                 co_return out;
             }
 

@@ -56,6 +56,7 @@ namespace usub::pg
             PQfinish(conn_);
             conn_ = nullptr;
         }
+        connected_ = false;
     }
 
     // ---- connect ----
@@ -142,6 +143,7 @@ namespace usub::pg
             std::string err = "PQsocket < 0";
             PQfinish(conn_);
             conn_ = nullptr;
+            connected_ = false;
             co_return std::optional<std::string>{std::move(err)};
         }
 
@@ -169,7 +171,11 @@ namespace usub::pg
         {
             const int fr = PQflush(conn_);
             if (fr == 0) co_return true;
-            if (fr == -1) co_return false;
+            if (fr == -1)
+            {
+                connected_ = false;
+                co_return false;
+            }
             co_await wait_writable();
         }
     }
@@ -178,7 +184,11 @@ namespace usub::pg
     {
         for (;;)
         {
-            if (PQconsumeInput(conn_) == 0) co_return false;
+            if (PQconsumeInput(conn_) == 0)
+            {
+                connected_ = false;
+                co_return false;
+            }
             if (!PQisBusy(conn_)) co_return true;
             co_await wait_readable();
         }
@@ -226,6 +236,7 @@ namespace usub::pg
             out.code = PgErrorCode::SocketReadFailed;
             out.error = PQerrorMessage(conn_);
             out.rows_valid = false;
+            connected_ = false;
             co_return out;
         }
 
@@ -235,6 +246,7 @@ namespace usub::pg
             out.code = PgErrorCode::SocketReadFailed;
             out.error = PQerrorMessage(conn_);
             out.rows_valid = false;
+            connected_ = false;
             co_return out;
         }
 
@@ -244,6 +256,7 @@ namespace usub::pg
             out.code = PgErrorCode::SocketReadFailed;
             out.error = PQerrorMessage(conn_);
             out.rows_valid = false;
+            connected_ = false;
             co_return out;
         }
 
@@ -269,6 +282,7 @@ namespace usub::pg
         {
             out.code = PgErrorCode::SocketReadFailed;
             out.error = PQerrorMessage(conn_);
+            connected_ = false;
             co_return out;
         }
 
@@ -276,6 +290,7 @@ namespace usub::pg
         {
             out.code = PgErrorCode::SocketReadFailed;
             out.error = PQerrorMessage(conn_);
+            connected_ = false;
             co_return out;
         }
 
@@ -283,6 +298,7 @@ namespace usub::pg
         {
             out.code = PgErrorCode::SocketReadFailed;
             out.error = PQerrorMessage(conn_);
+            connected_ = false;
             co_return out;
         }
 
@@ -325,6 +341,7 @@ namespace usub::pg
         {
             out.code = PgErrorCode::SocketReadFailed;
             out.error = PQerrorMessage(conn_);
+            connected_ = false;
             co_return out;
         }
 
@@ -332,6 +349,7 @@ namespace usub::pg
         {
             out.code = PgErrorCode::SocketReadFailed;
             out.error = PQerrorMessage(conn_);
+            connected_ = false;
             co_return out;
         }
 
@@ -359,6 +377,7 @@ namespace usub::pg
         {
             out.code = PgErrorCode::SocketReadFailed;
             out.error = PQerrorMessage(conn_);
+            connected_ = false;
             co_return out;
         }
 
@@ -366,6 +385,7 @@ namespace usub::pg
         {
             out.code = PgErrorCode::SocketReadFailed;
             out.error = PQerrorMessage(conn_);
+            connected_ = false;
             co_return out;
         }
 
@@ -373,6 +393,7 @@ namespace usub::pg
         {
             out.code = PgErrorCode::SocketReadFailed;
             out.error = PQerrorMessage(conn_);
+            connected_ = false;
             co_return out;
         }
 
@@ -398,6 +419,7 @@ namespace usub::pg
         {
             out.code = PgErrorCode::SocketReadFailed;
             out.error = PQerrorMessage(conn_);
+            connected_ = false;
             co_return out;
         }
 
@@ -405,6 +427,7 @@ namespace usub::pg
         {
             out.code = PgErrorCode::SocketReadFailed;
             out.error = PQerrorMessage(conn_);
+            connected_ = false;
             co_return out;
         }
 
@@ -412,6 +435,7 @@ namespace usub::pg
         {
             out.code = PgErrorCode::SocketReadFailed;
             out.error = PQerrorMessage(conn_);
+            connected_ = false;
             co_return out;
         }
 
@@ -546,6 +570,7 @@ namespace usub::pg
         {
             chunk.code = PgErrorCode::SocketReadFailed;
             chunk.error = PQerrorMessage(conn_);
+            connected_ = false;
             co_return chunk;
         }
 
@@ -553,6 +578,7 @@ namespace usub::pg
         {
             chunk.code = PgErrorCode::SocketReadFailed;
             chunk.error = PQerrorMessage(conn_);
+            connected_ = false;
             co_return chunk;
         }
 
@@ -560,6 +586,7 @@ namespace usub::pg
         {
             chunk.code = PgErrorCode::SocketReadFailed;
             chunk.error = PQerrorMessage(conn_);
+            connected_ = false;
             co_return chunk;
         }
 
@@ -589,6 +616,7 @@ namespace usub::pg
             final.code = PgErrorCode::SocketReadFailed;
             final.error = PQerrorMessage(conn_);
             final.rows_valid = false;
+            connected_ = false;
             co_return final;
         }
 
@@ -597,6 +625,7 @@ namespace usub::pg
             final.code = PgErrorCode::SocketReadFailed;
             final.error = PQerrorMessage(conn_);
             final.rows_valid = false;
+            connected_ = false;
             co_return final;
         }
 
@@ -605,6 +634,7 @@ namespace usub::pg
             final.code = PgErrorCode::SocketReadFailed;
             final.error = PQerrorMessage(conn_);
             final.rows_valid = false;
+            connected_ = false;
             co_return final;
         }
 

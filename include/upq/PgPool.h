@@ -16,6 +16,35 @@
 
 namespace usub::pg
 {
+    struct HealthStats
+    {
+        std::atomic<uint64_t> checked{0};
+        std::atomic<uint64_t> alive{0};
+        std::atomic<uint64_t> reconnected{0};
+    };
+
+    inline bool is_fatal_connection_error(const QueryResult& qr)
+    {
+        if (qr.ok)
+            return false;
+
+        if (qr.code == PgErrorCode::SocketReadFailed ||
+            qr.code == PgErrorCode::ConnectionClosed)
+            return true;
+
+        if (!qr.error.empty())
+        {
+            if (qr.error.find("another command is already in progress") != std::string::npos)
+                return true;
+            if (qr.error.find("could not receive data from server") != std::string::npos)
+                return true;
+            if (qr.error.find("server closed the connection unexpectedly") != std::string::npos)
+                return true;
+        }
+
+        return false;
+    }
+
     class PgPool
     {
     public:
@@ -103,7 +132,12 @@ namespace usub::pg
 
             auto conn = *c;
             auto res = co_await query_on_reflect_expected<T>(conn, sql);
-            co_await release_connection_async(conn);
+
+            if (!res)
+                mark_dead(conn);
+            else
+                co_await release_connection_async(conn);
+
             co_return res;
         }
 
@@ -117,7 +151,12 @@ namespace usub::pg
 
             auto conn = *c;
             auto res = co_await query_on_reflect_expected_one<T>(conn, sql);
-            co_await release_connection_async(conn);
+
+            if (!res)
+                mark_dead(conn);
+            else
+                co_await release_connection_async(conn);
+
             co_return res;
         }
 
@@ -179,7 +218,12 @@ namespace usub::pg
 
             auto conn = *c;
             auto res = co_await query_on_reflect_expected<T>(conn, sql, std::forward<Args>(args)...);
-            co_await release_connection_async(conn);
+
+            if (!res)
+                mark_dead(conn);
+            else
+                co_await release_connection_async(conn);
+
             co_return res;
         }
 
@@ -193,7 +237,12 @@ namespace usub::pg
 
             auto conn = *c;
             auto res = co_await query_on_reflect_expected_one<T>(conn, sql, std::forward<Args>(args)...);
-            co_await release_connection_async(conn);
+
+            if (!res)
+                mark_dead(conn);
+            else
+                co_await release_connection_async(conn);
+
             co_return res;
         }
 
@@ -215,13 +264,6 @@ namespace usub::pg
 
         void mark_dead(std::shared_ptr<PgConnectionLibpq> const& conn);
 
-        struct HealthStats
-        {
-            std::atomic<uint64_t> checked{0};
-            std::atomic<uint64_t> alive{0};
-            std::atomic<uint64_t> reconnected{0};
-        };
-
         inline HealthStats& health_stats() { return stats_; }
 
     private:
@@ -230,7 +272,6 @@ namespace usub::pg
         std::string user_;
         std::string db_;
         std::string password_;
-        int retries_on_connection_failed_;
 
         usub::queue::concurrent::MPMCQueue<std::shared_ptr<PgConnectionLibpq>> idle_;
 
@@ -238,9 +279,8 @@ namespace usub::pg
         std::atomic<size_t> live_count_;
 
         HealthStats stats_;
+        int retries_on_connection_failed_;
     };
-
-    // ----------------- impl -----------------
 
     template <typename... Args>
     usub::uvent::task::Awaitable<QueryResult>
@@ -298,7 +338,15 @@ namespace usub::pg
             std::forward<Args>(args)...
         );
 
-        co_await release_connection_async(conn);
+        if (is_fatal_connection_error(qr))
+        {
+            mark_dead(conn);
+        }
+        else
+        {
+            co_await release_connection_async(conn);
+        }
+
         co_return qr;
     }
 
@@ -449,7 +497,16 @@ namespace usub::pg
 
         auto conn = *c;
         auto qr = co_await exec_reflect_on(conn, sql, obj);
-        co_await release_connection_async(conn);
+
+        if (is_fatal_connection_error(qr))
+        {
+            mark_dead(conn);
+        }
+        else
+        {
+            co_await release_connection_async(conn);
+        }
+
         co_return qr;
     }
 } // namespace usub::pg

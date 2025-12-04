@@ -92,7 +92,9 @@ namespace usub::pg
         query_reflect_expected(const std::string& sql)
         {
             if (!active_ || !conn_ || !conn_->connected())
-                co_return std::unexpected(PgOpError{PgErrorCode::InvalidFuture, "transaction not active", {}});
+                co_return std::unexpected(
+                    PgOpError{PgErrorCode::InvalidFuture, "transaction not active", {}}
+                );
 
             QueryResult qr = co_await conn_->exec_simple_query_nonblocking(sql);
             if (!qr.ok)
@@ -115,13 +117,17 @@ namespace usub::pg
         query_reflect_expected_one(const std::string& sql)
         {
             if (!active_ || !conn_ || !conn_->connected())
-                co_return std::unexpected(PgOpError{PgErrorCode::InvalidFuture, "transaction not active", {}});
+                co_return std::unexpected(
+                    PgOpError{PgErrorCode::InvalidFuture, "transaction not active", {}}
+                );
 
             QueryResult qr = co_await conn_->exec_simple_query_nonblocking(sql);
             if (!qr.ok)
                 co_return std::unexpected(PgOpError{qr.code, qr.error, qr.err_detail});
             if (qr.rows.empty())
-                co_return std::unexpected(PgOpError{PgErrorCode::Unknown, "no rows", {}});
+                co_return std::unexpected(
+                    PgOpError{PgErrorCode::Unknown, "no rows", {}}
+                );
 
             try
             {
@@ -140,7 +146,9 @@ namespace usub::pg
         query_reflect_expected(const std::string& sql, const Obj& obj)
         {
             if (!active_ || !conn_ || !conn_->connected())
-                co_return std::unexpected(PgOpError{PgErrorCode::InvalidFuture, "transaction not active", {}});
+                co_return std::unexpected(
+                    PgOpError{PgErrorCode::InvalidFuture, "transaction not active", {}}
+                );
 
             QueryResult qr = co_await conn_->exec_param_query_nonblocking(sql, obj);
             if (!qr.ok)
@@ -163,13 +171,17 @@ namespace usub::pg
         query_reflect_expected_one(const std::string& sql, const Obj& obj)
         {
             if (!active_ || !conn_ || !conn_->connected())
-                co_return std::unexpected(PgOpError{PgErrorCode::InvalidFuture, "transaction not active", {}});
+                co_return std::unexpected(
+                    PgOpError{PgErrorCode::InvalidFuture, "transaction not active", {}}
+                );
 
             QueryResult qr = co_await conn_->exec_param_query_nonblocking(sql, obj);
             if (!qr.ok)
                 co_return std::unexpected(PgOpError{qr.code, qr.error, qr.err_detail});
             if (qr.rows.empty())
-                co_return std::unexpected(PgOpError{PgErrorCode::Unknown, "no rows", {}});
+                co_return std::unexpected(
+                    PgOpError{PgErrorCode::Unknown, "no rows", {}}
+                );
 
             try
             {
@@ -188,7 +200,9 @@ namespace usub::pg
         query_reflect_expected(const std::string& sql, Args&&... args)
         {
             if (!active_ || !conn_ || !conn_->connected())
-                co_return std::unexpected(PgOpError{PgErrorCode::InvalidFuture, "transaction not active", {}});
+                co_return std::unexpected(
+                    PgOpError{PgErrorCode::InvalidFuture, "transaction not active", {}}
+                );
 
             QueryResult qr = co_await conn_->exec_param_query_nonblocking(
                 sql, std::forward<Args>(args)...);
@@ -212,14 +226,18 @@ namespace usub::pg
         query_reflect_expected_one(const std::string& sql, Args&&... args)
         {
             if (!active_ || !conn_ || !conn_->connected())
-                co_return std::unexpected(PgOpError{PgErrorCode::InvalidFuture, "transaction not active", {}});
+                co_return std::unexpected(
+                    PgOpError{PgErrorCode::InvalidFuture, "transaction not active", {}}
+                );
 
             QueryResult qr = co_await conn_->exec_param_query_nonblocking(
                 sql, std::forward<Args>(args)...);
             if (!qr.ok)
                 co_return std::unexpected(PgOpError{qr.code, qr.error, qr.err_detail});
             if (qr.rows.empty())
-                co_return std::unexpected(PgOpError{PgErrorCode::Unknown, "no rows", {}});
+                co_return std::unexpected(
+                    PgOpError{PgErrorCode::Unknown, "no rows", {}}
+                );
 
             try
             {
@@ -305,6 +323,9 @@ namespace usub::pg
         bool committed_{false};
         bool rolled_back_{false};
 
+        // режим "без реальной транзакции" для read-only (чтобы не слать BEGIN)
+        bool emulate_readonly_autocommit_{false};
+
         usub::uvent::task::Awaitable<bool> send_sql_nocheck(const std::string& sql);
         static std::string build_begin_sql(const PgTransactionConfig& cfg);
     };
@@ -334,12 +355,20 @@ namespace usub::pg
             rolled_back_ = true;
             committed_ = false;
 
-            co_await pool_->release_connection_async(conn_);
+            pool_->mark_dead(conn_);
             conn_.reset();
             co_return bad;
         }
 
         QueryResult qr = co_await pool_->query_on(conn_, sql, std::forward<Args>(args)...);
+        if (is_fatal_connection_error(qr))
+        {
+            pool_->mark_dead(conn_);
+            conn_.reset();
+            active_ = false;
+            rolled_back_ = true;
+            committed_ = false;
+        }
         co_return qr;
     }
 } // namespace usub::pg
