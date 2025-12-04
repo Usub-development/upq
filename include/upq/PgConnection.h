@@ -360,7 +360,8 @@ namespace usub::pg
         template <class Opt> requires Optional<Opt>
         struct param_arity_impl<Opt>
         {
-            static constexpr size_t value = 1;
+            using Inner = typename std::decay_t<Opt>::value_type;
+            static constexpr size_t value = param_arity_impl<Inner>::value;
         };
 
         template <class C> requires ArrayLike<C>
@@ -421,6 +422,10 @@ namespace usub::pg
 
         usub::uvent::task::Awaitable<std::optional<std::string>>
         connect_async(const std::string& conninfo);
+
+        usub::uvent::task::Awaitable<std::optional<std::string>>
+        connect_async(const std::string& conninfo,
+                      std::chrono::milliseconds timeout);
 
         [[nodiscard]] bool connected() const noexcept;
 

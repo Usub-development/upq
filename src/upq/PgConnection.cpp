@@ -62,18 +62,88 @@ namespace usub::pg
     usub::uvent::task::Awaitable<std::optional<std::string>>
     PgConnectionLibpq::connect_async(const std::string& conninfo)
     {
-        conn_ = PQconnectStart(conninfo.c_str());
-        if (!conn_) co_return std::optional<std::string>{"PQconnectStart failed"};
+        using namespace std::chrono_literals;
+        co_return co_await connect_async(conninfo, 5s);
+    }
+
+    usub::uvent::task::Awaitable<std::optional<std::string>>
+    PgConnectionLibpq::connect_async(const std::string& conninfo,
+                                     std::chrono::milliseconds timeout)
+    {
+        using namespace std::chrono_literals;
+
+        auto clamped = (timeout <= 0ms) ? 5s : timeout;
+        const auto start = std::chrono::steady_clock::now();
+        const auto deadline = start + clamped;
+
+        std::string conninfo_with_to = conninfo;
+        if (conninfo_with_to.find("connect_timeout") == std::string::npos)
+        {
+            auto secs = std::chrono::duration_cast<std::chrono::seconds>(clamped).count();
+            if (secs <= 0) secs = 1;
+            conninfo_with_to += " connect_timeout=" + std::to_string(secs);
+        }
+
+        conn_ = PQconnectStart(conninfo_with_to.c_str());
+        if (!conn_)
+            co_return std::optional<std::string>{"PQconnectStart failed"};
 
         if (PQstatus(conn_) == CONNECTION_BAD)
-            co_return std::optional<std::string>{PQerrorMessage(conn_)};
+        {
+            std::string err = PQerrorMessage(conn_);
+            PQfinish(conn_);
+            conn_ = nullptr;
+            co_return std::optional<std::string>{std::move(err)};
+        }
 
         if (PQsetnonblocking(conn_, 1) != 0)
-            co_return std::optional<std::string>{"PQsetnonblocking failed"};
+        {
+            std::string err = "PQsetnonblocking failed";
+            PQfinish(conn_);
+            conn_ = nullptr;
+            co_return std::optional<std::string>{std::move(err)};
+        }
+
+        for (;;)
+        {
+            auto st = PQconnectPoll(conn_);
+            if (st == PGRES_POLLING_OK)
+            {
+                break;
+            }
+
+            if (st == PGRES_POLLING_FAILED)
+            {
+                std::string err = PQerrorMessage(conn_);
+                PQfinish(conn_);
+                conn_ = nullptr;
+                connected_ = false;
+                co_return std::optional<std::string>{std::move(err)};
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline)
+            {
+                auto elapsed_ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
+                std::string err = "connect timeout after " + std::to_string(elapsed_ms) + " ms";
+                PQfinish(conn_);
+                conn_ = nullptr;
+                connected_ = false;
+                co_return std::optional<std::string>{std::move(err)};
+            }
+
+            co_await usub::uvent::system::this_coroutine::sleep_for(5ms);
+        }
 
         const int fd = PQsocket(conn_);
         if (fd < 0)
-            co_return std::optional<std::string>{"PQsocket <0"};
+        {
+            std::string err = "PQsocket < 0";
+            PQfinish(conn_);
+            conn_ = nullptr;
+            co_return std::optional<std::string>{std::move(err)};
+        }
 
         sock_ = std::make_unique<
             usub::uvent::net::Socket<
@@ -82,24 +152,7 @@ namespace usub::pg
             >
         >(fd);
 
-        for (;;)
-        {
-            const auto st = PQconnectPoll(conn_);
-            if (st == PGRES_POLLING_OK) break;
-            if (st == PGRES_POLLING_FAILED) co_return std::optional<std::string>{PQerrorMessage(conn_)};
-            if (st == PGRES_POLLING_READING)
-            {
-                co_await wait_readable();
-                continue;
-            }
-            if (st == PGRES_POLLING_WRITING)
-            {
-                co_await wait_writable();
-                continue;
-            }
-            co_await usub::uvent::system::this_coroutine::sleep_for(std::chrono::milliseconds(1));
-        }
-
+        sock_->set_timeout_ms(static_cast<int>(clamped.count()));
         connected_ = true;
         co_return std::nullopt;
     }
