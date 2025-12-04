@@ -90,6 +90,7 @@ namespace usub::pg
         PoolLimits limits{};
         TimeoutsMs timeouts{};
         HealthCfg health{};
+        uint32_t connect_retries{20};
     };
 
     struct Row
@@ -131,6 +132,7 @@ namespace usub::pg
 
         Node* pick_primary();
         Node* pick_best_replica(const RouteHint& hint);
+        Node* pick_any(bool prefer_primary);
         bool ensure_pool(Node& n);
         static bool is_replica(NodeRole r);
         static bool is_usable(NodeRole r);

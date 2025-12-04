@@ -42,6 +42,9 @@ namespace usub::pg
 
         usub::uvent::task::Awaitable<bool> begin();
 
+        usub::uvent::task::Awaitable<std::optional<PgOpError>>
+        begin_errored();
+
         template <typename... Args>
         usub::uvent::task::Awaitable<QueryResult>
         query(const std::string& sql, Args&&... args);

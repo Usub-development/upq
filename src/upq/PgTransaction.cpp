@@ -56,20 +56,40 @@ namespace usub::pg
 
     usub::uvent::task::Awaitable<bool> PgTransaction::begin()
     {
-        if (active_) co_return true;
+        auto err = co_await begin_errored();
+        co_return !err.has_value();
+    }
+
+    usub::uvent::task::Awaitable<std::optional<PgOpError>>
+    PgTransaction::begin_errored()
+    {
+        if (active_)
+        {
+            co_return std::nullopt;
+        }
 
         auto c = co_await pool_->acquire_connection();
         if (!c)
         {
             conn_.reset();
-            co_return false;
+            PgOpError err{
+                PgErrorCode::ConnectionClosed,
+                "failed to acquire connection from pool",
+                {}
+            };
+            co_return std::make_optional(std::move(err));
         }
 
         conn_ = *c;
         if (!conn_ || !conn_->connected())
         {
             conn_.reset();
-            co_return false;
+            PgOpError err{
+                PgErrorCode::ConnectionClosed,
+                "connection not OK",
+                {}
+            };
+            co_return std::make_optional(std::move(err));
         }
 
         if (emulate_readonly_autocommit_)
@@ -77,13 +97,15 @@ namespace usub::pg
             active_ = true;
             committed_ = false;
             rolled_back_ = false;
-            co_return true;
+            co_return std::nullopt;
         }
 
         const std::string bsql = build_begin_sql(cfg_);
         QueryResult r_begin = co_await pool_->query_on(conn_, bsql);
         if (!r_begin.ok)
         {
+            PgOpError err{r_begin.code, r_begin.error, r_begin.err_detail};
+
             if (is_fatal_connection_error(r_begin))
             {
                 pool_->mark_dead(conn_);
@@ -97,13 +119,13 @@ namespace usub::pg
             active_ = false;
             committed_ = false;
             rolled_back_ = false;
-            co_return false;
+            co_return std::make_optional(std::move(err));
         }
 
         active_ = true;
         committed_ = false;
         rolled_back_ = false;
-        co_return true;
+        co_return std::nullopt;
     }
 
     usub::uvent::task::Awaitable<bool> PgTransaction::commit()

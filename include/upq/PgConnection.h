@@ -544,6 +544,8 @@ namespace usub::pg
         PGconn* raw_conn() noexcept;
         bool is_idle();
 
+        void close();
+
     private:
         usub::uvent::task::Awaitable<void> wait_readable();
         usub::uvent::task::Awaitable<void> wait_writable();

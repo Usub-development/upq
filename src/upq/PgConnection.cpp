@@ -50,13 +50,7 @@ namespace usub::pg
 
     PgConnectionLibpq::~PgConnectionLibpq()
     {
-        if (sock_) sock_.reset();
-        if (conn_)
-        {
-            PQfinish(conn_);
-            conn_ = nullptr;
-        }
-        connected_ = false;
+        this->close();
     }
 
     // ---- connect ----
@@ -648,17 +642,46 @@ namespace usub::pg
 
     bool PgConnectionLibpq::is_idle()
     {
-        if (!connected()) return false;
-        if (PQisBusy(conn_) != 0) return false;
+        if (!connected())
+            return false;
+
+        if (PQconsumeInput(this->conn_) == 0)
+        {
+            this->connected_ = false;
+            return false;
+        }
+
+        if (PQisBusy(this->conn_) != 0)
+            return false;
 
         bool clean = true;
-        while (PGresult* r = PQgetResult(conn_))
+        while (PGresult* r = PQgetResult(this->conn_))
         {
             const auto st = PQresultStatus(r);
-            if (st != PGRES_COMMAND_OK && st != PGRES_TUPLES_OK) clean = false;
+            if (st != PGRES_COMMAND_OK && st != PGRES_TUPLES_OK)
+                clean = false;
             PQclear(r);
         }
         return clean;
+    }
+
+    void PgConnectionLibpq::close()
+    {
+        UPQ_CONN_DBG("close: conn=%p connected=%d", static_cast<void*>(conn_), connected_ ? 1 : 0);
+
+        this->connected_ = false;
+
+        if (this->sock_)
+        {
+            this->sock_->shutdown();
+            this->sock_.reset();
+        }
+
+        if (this->conn_)
+        {
+            PQfinish(this->conn_);
+            this->conn_ = nullptr;
+        }
     }
 
     // ---- drainers ----

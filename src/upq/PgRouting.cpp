@@ -33,7 +33,8 @@ namespace usub::pg
             {
                 pool = std::make_unique<PgPool>(
                     ep.host, ep.port, ep.user, ep.db, ep.password,
-                    ep.max_pool ? ep.max_pool : pool_cap_for(ep.role, this->cfg_.limits)
+                    ep.max_pool ? ep.max_pool : pool_cap_for(ep.role, this->cfg_.limits),
+                    this->cfg_.connect_retries
                 );
             }
             catch (...)
@@ -68,7 +69,8 @@ namespace usub::pg
         try
         {
             const size_t cap = n.ep.max_pool ? n.ep.max_pool : pool_cap_for(n.ep.role, this->cfg_.limits);
-            n.pool = std::make_unique<PgPool>(n.ep.host, n.ep.port, n.ep.user, n.ep.db, n.ep.password, cap);
+            n.pool = std::make_unique<PgPool>(n.ep.host, n.ep.port, n.ep.user, n.ep.db, n.ep.password, cap,
+                                              this->cfg_.connect_retries);
             return true;
         }
         catch (...)
@@ -80,16 +82,35 @@ namespace usub::pg
 
     PgPool* PgConnector::route(const RouteHint& hint)
     {
-        if (hint.kind == QueryKind::Write || hint.kind == QueryKind::DDL
-            || hint.consistency == Consistency::Strong || hint.read_my_writes)
+        if (hint.kind == QueryKind::Write ||
+            hint.kind == QueryKind::DDL ||
+            hint.consistency == Consistency::Strong ||
+            hint.read_my_writes)
         {
-            if (auto* p = this->pick_primary()) if (this->ensure_pool(*p)) return p->pool.get();
+            if (auto* p = this->pick_primary())
+                if (this->ensure_pool(*p))
+                    return p->pool.get();
+
+            if (auto* any = this->pick_any(true))
+                return any->pool.get();
+
             return nullptr;
         }
-        if (auto* r = this->pick_best_replica(hint)) if (this->ensure_pool(*r)) return r->pool.get();
-        if (auto* p = this->pick_primary()) if (this->ensure_pool(*p)) return p->pool.get();
+
+        if (auto* r = this->pick_best_replica(hint))
+            if (this->ensure_pool(*r))
+                return r->pool.get();
+
+        if (auto* p = this->pick_primary())
+            if (this->ensure_pool(*p))
+                return p->pool.get();
+
+        if (auto* any = this->pick_any(false))
+            return any->pool.get();
+
         return nullptr;
     }
+
 
     PgPool* PgConnector::route_for_tx(const PgTransactionConfig& cfg_tx)
     {
@@ -97,34 +118,67 @@ namespace usub::pg
             (cfg_tx.isolation == TxIsolationLevel::Serializable)
                 ? Consistency::Strong
                 : this->cfg_.routing.default_consistency;
+
         if (!cfg_tx.read_only || eff_consistency == Consistency::Strong)
         {
-            if (auto* p = this->pick_primary()) if (this->ensure_pool(*p)) return p->pool.get();
+            if (auto* p = this->pick_primary())
+                if (this->ensure_pool(*p))
+                    return p->pool.get();
+
+            if (auto* any = this->pick_any(true))
+                return any->pool.get();
+
             return nullptr;
         }
+
         if (cfg_tx.deferrable)
         {
             Node* best = nullptr;
             for (auto& n : this->nodes_)
             {
-                if (n.ep.role != NodeRole::SyncReplica || !this->is_usable(n.ep.role) || n.cb_state == 2) continue;
-                if (!n.pool || !n.stats.healthy) continue;
-                if (!best || n.stats.replay_lag < best->stats.replay_lag) best = &n;
+                if (n.ep.role != NodeRole::SyncReplica ||
+                    !this->is_usable(n.ep.role) ||
+                    n.cb_state == 2)
+                    continue;
+                if (!n.pool || !n.stats.healthy)
+                    continue;
+                if (!best || n.stats.replay_lag < best->stats.replay_lag)
+                    best = &n;
             }
-            if (best && this->ensure_pool(*best)) return best->pool.get();
-            if (auto* p = this->pick_primary()) if (this->ensure_pool(*p)) return p->pool.get();
+            if (best && this->ensure_pool(*best))
+                return best->pool.get();
+
+            if (auto* p = this->pick_primary())
+                if (this->ensure_pool(*p))
+                    return p->pool.get();
+
+            if (auto* any = this->pick_any(true))
+                return any->pool.get();
+
             return nullptr;
         }
+
         RouteHint rh{
             .kind = QueryKind::Read,
             .consistency = eff_consistency,
             .staleness = this->cfg_.routing.bounded_staleness,
             .read_my_writes = false
         };
-        if (auto* r = this->pick_best_replica(rh)) if (this->ensure_pool(*r)) return r->pool.get();
-        if (auto* p = this->pick_primary()) if (this->ensure_pool(*p)) return p->pool.get();
+
+        if (auto* r = this->pick_best_replica(rh))
+            if (this->ensure_pool(*r))
+                return r->pool.get();
+
+        if (auto* p = this->pick_primary())
+            if (this->ensure_pool(*p))
+                return p->pool.get();
+
+        if (auto* any = this->pick_any(false))
+            return any->pool.get();
+
         return nullptr;
     }
+
 
     PgConnector::Node* PgConnector::pick_primary()
     {
@@ -164,6 +218,33 @@ namespace usub::pg
             if (!best || better(&n, best)) best = &n;
         }
         return best;
+    }
+
+    PgConnector::Node* PgConnector::pick_any(bool prefer_primary)
+    {
+        Node* primary = nullptr;
+        Node* any_replica = nullptr;
+
+        for (auto& n : this->nodes_)
+        {
+            if (!this->is_usable(n.ep.role))
+                continue;
+            if (!n.pool && !this->ensure_pool(n))
+                continue;
+
+            if (n.ep.role == NodeRole::Primary)
+            {
+                if (!primary) primary = &n;
+            }
+            else if (this->is_replica(n.ep.role))
+            {
+                if (!any_replica) any_replica = &n;
+            }
+        }
+
+        if (prefer_primary)
+            return primary ? primary : any_replica;
+        return any_replica ? any_replica : primary;
     }
 
     void PgConnector::apply_circuit_breaker(Node& n, bool ok)

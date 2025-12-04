@@ -35,12 +35,15 @@ namespace usub::pg
         {
             if (this->idle_.try_dequeue(conn))
             {
-                if (!conn->connected() || !conn->is_idle())
+                if (!conn || !conn->connected() || !conn->is_idle())
                 {
-                    this->live_count_.fetch_sub(1, std::memory_order_relaxed);
+                    mark_dead(conn);
                     continue;
                 }
-                co_return std::expected<std::shared_ptr<PgConnectionLibpq>, PgOpError>{std::in_place, std::move(conn)};
+
+                co_return std::expected<std::shared_ptr<PgConnectionLibpq>, PgOpError>{
+                    std::in_place, std::move(conn)
+                };
             }
 
             size_t cur_live = this->live_count_.load(std::memory_order_relaxed);
@@ -65,7 +68,7 @@ namespace usub::pg
                     auto err = co_await newConn->connect_async(conninfo);
                     if (err.has_value())
                     {
-                        this->live_count_.fetch_sub(1, std::memory_order_relaxed);
+                        mark_dead(newConn);
                     }
                     else
                     {
@@ -93,13 +96,13 @@ namespace usub::pg
 
         if (!conn->connected() || !conn->is_idle())
         {
-            this->live_count_.fetch_sub(1, std::memory_order_relaxed);
+            mark_dead(conn);
             return;
         }
 
         if (!this->idle_.try_enqueue(conn))
         {
-            this->live_count_.fetch_sub(1, std::memory_order_relaxed);
+            mark_dead(conn);
         }
     }
 
@@ -113,7 +116,7 @@ namespace usub::pg
 
         if (!conn->connected())
         {
-            this->live_count_.fetch_sub(1, std::memory_order_relaxed);
+            mark_dead(conn);
             co_return;
         }
 
@@ -125,13 +128,13 @@ namespace usub::pg
 
         if (!conn->connected() || !conn->is_idle())
         {
-            this->live_count_.fetch_sub(1, std::memory_order_relaxed);
+            mark_dead(conn);
             co_return;
         }
 
         if (!this->idle_.try_enqueue(conn))
         {
-            this->live_count_.fetch_sub(1, std::memory_order_relaxed);
+            mark_dead(conn);
         }
 
         co_return;
@@ -142,6 +145,7 @@ namespace usub::pg
         if (!conn)
             return;
 
+        conn->close();
         this->live_count_.fetch_sub(1, std::memory_order_relaxed);
     }
 }

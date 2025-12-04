@@ -54,7 +54,7 @@ namespace usub::pg
                std::string db,
                std::string password,
                size_t max_pool_size = 32,
-               int retries_on_connection_failed = 5);
+               int retries_on_connection_failed = 20);
 
         ~PgPool();
 
