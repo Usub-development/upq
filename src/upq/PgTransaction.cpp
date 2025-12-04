@@ -39,8 +39,6 @@ namespace usub::pg
         : pool_(pool)
           , cfg_(cfg)
     {
-        // хак: для read_only транзакций без deferrable работаем без BEGIN/COMMIT,
-        // просто удерживаем коннект и шлём запросы в автокоммите.
         if (cfg_.read_only && !cfg_.deferrable)
         {
             emulate_readonly_autocommit_ = true;
@@ -74,7 +72,6 @@ namespace usub::pg
             co_return false;
         }
 
-        // read-only режим без реальной транзакции — просто держим коннект
         if (emulate_readonly_autocommit_)
         {
             active_ = true;
@@ -87,12 +84,6 @@ namespace usub::pg
         QueryResult r_begin = co_await pool_->query_on(conn_, bsql);
         if (!r_begin.ok)
         {
-            std::cout
-                << "BEGIN failed: sql=[" << bsql << "] "
-                << "code=" << toString(r_begin.code)
-                << " sqlstate=" << r_begin.err_detail.sqlstate
-                << " msg=" << r_begin.error << std::endl;
-
             if (is_fatal_connection_error(r_begin))
             {
                 pool_->mark_dead(conn_);
@@ -298,7 +289,7 @@ namespace usub::pg
     PgTransaction::PgSubtransaction::begin()
     {
         if (!parent_.active_ || !parent_.conn_ || !parent_.conn_->connected()) co_return false;
-        if (parent_.emulate_readonly_autocommit_) co_return false; // savepoint'ы тут не поддерживаем
+        if (parent_.emulate_readonly_autocommit_) co_return false;
 
         std::string cmd = "SAVEPOINT " + sp_name_;
         QueryResult r = co_await parent_.pool_->query_on(parent_.conn_, cmd);

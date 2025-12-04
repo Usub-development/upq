@@ -323,7 +323,6 @@ namespace usub::pg
         bool committed_{false};
         bool rolled_back_{false};
 
-        // режим "без реальной транзакции" для read-only (чтобы не слать BEGIN)
         bool emulate_readonly_autocommit_{false};
 
         usub::uvent::task::Awaitable<bool> send_sql_nocheck(const std::string& sql);
