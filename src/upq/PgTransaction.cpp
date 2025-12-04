@@ -42,6 +42,10 @@ namespace usub::pg
 
     PgTransaction::~PgTransaction()
     {
+        if (this->conn_) {
+            this->pool_->mark_dead(this->conn_);
+            this->conn_.reset();
+        }
     }
 
     usub::uvent::task::Awaitable<bool> PgTransaction::begin()
