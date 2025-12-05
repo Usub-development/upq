@@ -148,7 +148,6 @@ namespace usub::pg
             >
         >(fd);
 
-        sock_->set_timeout_ms(static_cast<int>(clamped.count()));
         connected_ = true;
         co_return std::nullopt;
     }
@@ -158,7 +157,6 @@ namespace usub::pg
         return connected_ && conn_ && (PQstatus(conn_) == CONNECTION_OK);
     }
 
-    // ---- IO helpers ----
     usub::uvent::task::Awaitable<bool> PgConnectionLibpq::flush_outgoing()
     {
         for (;;)
@@ -257,7 +255,6 @@ namespace usub::pg
         co_return drain_all_results();
     }
 
-    // ---- COPY IN/OUT ----
     usub::uvent::task::Awaitable<PgCopyResult>
     PgConnectionLibpq::copy_in_start(const std::string& sql)
     {
@@ -526,7 +523,6 @@ namespace usub::pg
         }
     }
 
-    // ---- cursors ----
     std::string PgConnectionLibpq::make_cursor_name()
     {
         const uint64_t seq = ++cursor_seq_;
@@ -633,7 +629,7 @@ namespace usub::pg
         }
 
         final = drain_all_results();
-        final.rows.clear(); // status only
+        final.rows.clear();
         final.rows_valid = true;
         co_return final;
     }
@@ -645,24 +641,7 @@ namespace usub::pg
         if (!connected())
             return false;
 
-        if (PQconsumeInput(this->conn_) == 0)
-        {
-            this->connected_ = false;
-            return false;
-        }
-
-        if (PQisBusy(this->conn_) != 0)
-            return false;
-
-        bool clean = true;
-        while (PGresult* r = PQgetResult(this->conn_))
-        {
-            const auto st = PQresultStatus(r);
-            if (st != PGRES_COMMAND_OK && st != PGRES_TUPLES_OK)
-                clean = false;
-            PQclear(r);
-        }
-        return clean;
+        return PQisBusy(this->conn_) == 0;
     }
 
     void PgConnectionLibpq::close()
@@ -684,7 +663,6 @@ namespace usub::pg
         }
     }
 
-    // ---- drainers ----
     usub::pg::QueryResult PgConnectionLibpq::drain_all_results()
     {
         QueryResult final_out;
@@ -703,7 +681,6 @@ namespace usub::pg
                 const int nrows = PQntuples(res);
                 const int ncols = PQnfields(res);
 
-                // collect column names for this resultset
                 tmp.columns.reserve(ncols);
                 for (int c = 0; c < ncols; ++c)
                 {
@@ -724,7 +701,6 @@ namespace usub::pg
                 }
 #endif
 
-                // collect rows
                 for (int r = 0; r < nrows; ++r)
                 {
                     QueryResult::Row row;
@@ -733,7 +709,7 @@ namespace usub::pg
                     {
                         if (PQgetisnull(res, r, c))
                         {
-                            row.cols.emplace_back(); // empty -> NULL
+                            row.cols.emplace_back();
                         }
                         else
                         {

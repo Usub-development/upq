@@ -8,11 +8,26 @@
 #include <atomic>
 #include <chrono>
 #include <expected>
+#include <cstdio>
 
 #include "uvent/Uvent.h"
+#include "uvent/sync/AsyncSemaphore.h"
 #include "PgConnection.h"
 #include "PgTypes.h"
+#include "PgReflect.h"
 #include "uvent/utils/datastructures/queue/ConcurrentQueues.h"
+
+#ifndef UPQ_POOL_DEBUG
+#define UPQ_POOL_DEBUG 1
+#endif
+
+#if UPQ_POOL_DEBUG
+#define UPQ_POOL_DBG(fmt, ...) \
+    do { std::fprintf(stderr, "[UPQ/pool] " fmt "\n", ##__VA_ARGS__); } while (0)
+#else
+#define UPQ_POOL_DBG(fmt, ...) \
+    do { } while (0)
+#endif
 
 namespace usub::pg
 {
@@ -94,6 +109,8 @@ namespace usub::pg
         [[deprecated]] usub::uvent::task::Awaitable<std::optional<T>>
         query_reflect_one(const std::string& sql);
 
+        // ---- EXPECTED, без параметров ----
+
         template <class T>
         usub::uvent::task::Awaitable<std::expected<std::vector<T>, PgOpError>>
         query_on_reflect_expected(std::shared_ptr<PgConnectionLibpq> const& conn,
@@ -103,8 +120,17 @@ namespace usub::pg
             if (!qr.ok)
                 co_return std::unexpected(PgOpError{qr.code, qr.error, qr.err_detail});
 
-            auto rows = co_await conn->exec_simple_query_nonblocking<T>(sql);
-            co_return std::expected<std::vector<T>, PgOpError>{std::in_place, std::move(rows)};
+            try
+            {
+                auto vec = usub::pg::map_all_reflect_named<T>(qr);
+                co_return std::expected<std::vector<T>, PgOpError>{std::in_place, std::move(vec)};
+            }
+            catch (const std::exception& e)
+            {
+                UPQ_POOL_DBG("query_on_reflect_expected named-map FAIL: %s — fallback to positional", e.what());
+                auto vec = usub::pg::map_all_reflect_positional<T>(qr);
+                co_return std::expected<std::vector<T>, PgOpError>{std::in_place, std::move(vec)};
+            }
         }
 
         template <class T>
@@ -116,10 +142,20 @@ namespace usub::pg
             if (!qr.ok)
                 co_return std::unexpected(PgOpError{qr.code, qr.error, qr.err_detail});
 
-            auto row = co_await conn->exec_simple_query_one_nonblocking<T>(sql);
-            if (!row)
+            if (qr.rows.empty())
                 co_return std::unexpected(PgOpError{PgErrorCode::Unknown, "no rows", {}});
-            co_return std::expected<T, PgOpError>{std::in_place, std::move(*row)};
+
+            try
+            {
+                auto v = usub::pg::map_single_reflect_named<T>(qr, 0);
+                co_return std::expected<T, PgOpError>{std::in_place, std::move(v)};
+            }
+            catch (const std::exception& e)
+            {
+                UPQ_POOL_DBG("query_on_reflect_expected_one named-one FAIL: %s — fallback to positional", e.what());
+                auto v = usub::pg::map_single_reflect_positional<T>(qr, 0);
+                co_return std::expected<T, PgOpError>{std::in_place, std::move(v)};
+            }
         }
 
         template <class T>
@@ -160,6 +196,8 @@ namespace usub::pg
             co_return res;
         }
 
+        // ---- EXPECTED, с параметрами ----
+
         template <class T, typename... Args>
         [[deprecated]] usub::uvent::task::Awaitable<std::vector<T>>
         query_on_reflect(std::shared_ptr<PgConnectionLibpq> const& conn,
@@ -187,9 +225,17 @@ namespace usub::pg
             if (!qr.ok)
                 co_return std::unexpected(PgOpError{qr.code, qr.error, qr.err_detail});
 
-            auto rows = co_await conn->exec_param_query_nonblocking<T>(
-                sql, std::forward<Args>(args)...);
-            co_return std::expected<std::vector<T>, PgOpError>{std::in_place, std::move(rows)};
+            try
+            {
+                auto vec = usub::pg::map_all_reflect_named<T>(qr);
+                co_return std::expected<std::vector<T>, PgOpError>{std::in_place, std::move(vec)};
+            }
+            catch (const std::exception& e)
+            {
+                UPQ_POOL_DBG("query_on_reflect_expected (param) named-map FAIL: %s — fallback to positional", e.what());
+                auto vec = usub::pg::map_all_reflect_positional<T>(qr);
+                co_return std::expected<std::vector<T>, PgOpError>{std::in_place, std::move(vec)};
+            }
         }
 
         template <class T, typename... Args>
@@ -201,11 +247,20 @@ namespace usub::pg
             if (!qr.ok)
                 co_return std::unexpected(PgOpError{qr.code, qr.error, qr.err_detail});
 
-            auto row = co_await conn->exec_param_query_one_nonblocking<T>(
-                sql, std::forward<Args>(args)...);
-            if (!row)
+            if (qr.rows.empty())
                 co_return std::unexpected(PgOpError{PgErrorCode::Unknown, "no rows", {}});
-            co_return std::expected<T, PgOpError>{std::in_place, std::move(*row)};
+
+            try
+            {
+                auto v = usub::pg::map_single_reflect_named<T>(qr, 0);
+                co_return std::expected<T, PgOpError>{std::in_place, std::move(v)};
+            }
+            catch (const std::exception& e)
+            {
+                UPQ_POOL_DBG("query_on_reflect_expected_one (param) named-one FAIL: %s — fallback to positional", e.what());
+                auto v = usub::pg::map_single_reflect_positional<T>(qr, 0);
+                co_return std::expected<T, PgOpError>{std::in_place, std::move(v)};
+            }
         }
 
         template <class T, typename... Args>
@@ -217,7 +272,8 @@ namespace usub::pg
                 co_return std::unexpected(c.error());
 
             auto conn = *c;
-            auto res = co_await query_on_reflect_expected<T>(conn, sql, std::forward<Args>(args)...);
+            auto res = co_await query_on_reflect_expected<T>(
+                conn, sql, std::forward<Args>(args)...);
 
             if (!res)
                 mark_dead(conn);
@@ -236,7 +292,8 @@ namespace usub::pg
                 co_return std::unexpected(c.error());
 
             auto conn = *c;
-            auto res = co_await query_on_reflect_expected_one<T>(conn, sql, std::forward<Args>(args)...);
+            auto res = co_await query_on_reflect_expected_one<T>(
+                conn, sql, std::forward<Args>(args)...);
 
             if (!res)
                 mark_dead(conn);
@@ -273,14 +330,18 @@ namespace usub::pg
         std::string db_;
         std::string password_;
 
-        usub::queue::concurrent::MPMCQueue<std::shared_ptr<PgConnectionLibpq>> idle_;
+        queue::concurrent::MPMCQueue<std::shared_ptr<PgConnectionLibpq>> idle_;
 
         size_t max_pool_;
         std::atomic<size_t> live_count_;
 
         HealthStats stats_;
         int retries_on_connection_failed_;
+
+        usub::uvent::sync::AsyncSemaphore idle_sem_{0};
     };
+
+    // ---- templates реализации ----
 
     template <typename... Args>
     usub::uvent::task::Awaitable<QueryResult>
@@ -509,6 +570,7 @@ namespace usub::pg
 
         co_return qr;
     }
+
 } // namespace usub::pg
 
-#endif
+#endif // PGPOOL_H

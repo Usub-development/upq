@@ -83,12 +83,14 @@ namespace usub::pg
         conn_ = *c;
         if (!conn_ || !conn_->connected())
         {
-            conn_.reset();
             PgOpError err{
                 PgErrorCode::ConnectionClosed,
                 "connection not OK",
                 {}
             };
+            if (conn_)
+                pool_->mark_dead(conn_);
+            conn_.reset();
             co_return std::make_optional(std::move(err));
         }
 
@@ -105,17 +107,9 @@ namespace usub::pg
         if (!r_begin.ok)
         {
             PgOpError err{r_begin.code, r_begin.error, r_begin.err_detail};
-
-            if (is_fatal_connection_error(r_begin))
-            {
-                pool_->mark_dead(conn_);
-            }
-            else
-            {
-                co_await pool_->release_connection_async(conn_);
-            }
-
+            pool_->mark_dead(conn_);
             conn_.reset();
+
             active_ = false;
             committed_ = false;
             rolled_back_ = false;
@@ -158,6 +152,7 @@ namespace usub::pg
         QueryResult r_commit = co_await pool_->query_on(conn_, "COMMIT");
         if (!r_commit.ok)
         {
+
             if (is_fatal_connection_error(r_commit))
             {
                 pool_->mark_dead(conn_);

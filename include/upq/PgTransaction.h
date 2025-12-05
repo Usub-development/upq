@@ -99,7 +99,18 @@ namespace usub::pg
                     PgOpError{PgErrorCode::InvalidFuture, "transaction not active", {}}
                 );
 
-            QueryResult qr = co_await conn_->exec_simple_query_nonblocking(sql);
+            QueryResult qr = co_await pool_->query_on(conn_, sql);
+
+            if (is_fatal_connection_error(qr))
+            {
+                pool_->mark_dead(conn_);
+                conn_.reset();
+                active_ = false;
+                rolled_back_ = true;
+                committed_ = false;
+                co_return std::unexpected(PgOpError{qr.code, qr.error, qr.err_detail});
+            }
+
             if (!qr.ok)
                 co_return std::unexpected(PgOpError{qr.code, qr.error, qr.err_detail});
 
@@ -108,7 +119,7 @@ namespace usub::pg
                 auto vec = usub::pg::map_all_reflect_named<T>(qr);
                 co_return std::expected<std::vector<T>, PgOpError>{std::in_place, std::move(vec)};
             }
-            catch (...)
+            catch (const std::exception&)
             {
                 auto vec = usub::pg::map_all_reflect_positional<T>(qr);
                 co_return std::expected<std::vector<T>, PgOpError>{std::in_place, std::move(vec)};
@@ -124,7 +135,18 @@ namespace usub::pg
                     PgOpError{PgErrorCode::InvalidFuture, "transaction not active", {}}
                 );
 
-            QueryResult qr = co_await conn_->exec_simple_query_nonblocking(sql);
+            QueryResult qr = co_await pool_->query_on(conn_, sql);
+
+            if (is_fatal_connection_error(qr))
+            {
+                pool_->mark_dead(conn_);
+                conn_.reset();
+                active_ = false;
+                rolled_back_ = true;
+                committed_ = false;
+                co_return std::unexpected(PgOpError{qr.code, qr.error, qr.err_detail});
+            }
+
             if (!qr.ok)
                 co_return std::unexpected(PgOpError{qr.code, qr.error, qr.err_detail});
             if (qr.rows.empty())
@@ -137,7 +159,7 @@ namespace usub::pg
                 auto v = usub::pg::map_single_reflect_named<T>(qr, 0);
                 co_return std::expected<T, PgOpError>{std::in_place, std::move(v)};
             }
-            catch (...)
+            catch (const std::exception&)
             {
                 auto v = usub::pg::map_single_reflect_positional<T>(qr, 0);
                 co_return std::expected<T, PgOpError>{std::in_place, std::move(v)};
@@ -153,7 +175,18 @@ namespace usub::pg
                     PgOpError{PgErrorCode::InvalidFuture, "transaction not active", {}}
                 );
 
-            QueryResult qr = co_await conn_->exec_param_query_nonblocking(sql, obj);
+            QueryResult qr = co_await pool_->query_on(conn_, sql, obj);
+
+            if (is_fatal_connection_error(qr))
+            {
+                pool_->mark_dead(conn_);
+                conn_.reset();
+                active_ = false;
+                rolled_back_ = true;
+                committed_ = false;
+                co_return std::unexpected(PgOpError{qr.code, qr.error, qr.err_detail});
+            }
+
             if (!qr.ok)
                 co_return std::unexpected(PgOpError{qr.code, qr.error, qr.err_detail});
 
@@ -162,7 +195,7 @@ namespace usub::pg
                 auto vec = usub::pg::map_all_reflect_named<T>(qr);
                 co_return std::expected<std::vector<T>, PgOpError>{std::in_place, std::move(vec)};
             }
-            catch (...)
+            catch (const std::exception&)
             {
                 auto vec = usub::pg::map_all_reflect_positional<T>(qr);
                 co_return std::expected<std::vector<T>, PgOpError>{std::in_place, std::move(vec)};
@@ -178,7 +211,18 @@ namespace usub::pg
                     PgOpError{PgErrorCode::InvalidFuture, "transaction not active", {}}
                 );
 
-            QueryResult qr = co_await conn_->exec_param_query_nonblocking(sql, obj);
+            QueryResult qr = co_await pool_->query_on(conn_, sql, obj);
+
+            if (is_fatal_connection_error(qr))
+            {
+                pool_->mark_dead(conn_);
+                conn_.reset();
+                active_ = false;
+                rolled_back_ = true;
+                committed_ = false;
+                co_return std::unexpected(PgOpError{qr.code, qr.error, qr.err_detail});
+            }
+
             if (!qr.ok)
                 co_return std::unexpected(PgOpError{qr.code, qr.error, qr.err_detail});
             if (qr.rows.empty())
@@ -191,7 +235,7 @@ namespace usub::pg
                 auto v = usub::pg::map_single_reflect_named<T>(qr, 0);
                 co_return std::expected<T, PgOpError>{std::in_place, std::move(v)};
             }
-            catch (...)
+            catch (const std::exception&)
             {
                 auto v = usub::pg::map_single_reflect_positional<T>(qr, 0);
                 co_return std::expected<T, PgOpError>{std::in_place, std::move(v)};
@@ -207,8 +251,22 @@ namespace usub::pg
                     PgOpError{PgErrorCode::InvalidFuture, "transaction not active", {}}
                 );
 
-            QueryResult qr = co_await conn_->exec_param_query_nonblocking(
-                sql, std::forward<Args>(args)...);
+            QueryResult qr = co_await pool_->query_on(
+                conn_,
+                sql,
+                std::forward<Args>(args)...
+            );
+
+            if (is_fatal_connection_error(qr))
+            {
+                pool_->mark_dead(conn_);
+                conn_.reset();
+                active_ = false;
+                rolled_back_ = true;
+                committed_ = false;
+                co_return std::unexpected(PgOpError{qr.code, qr.error, qr.err_detail});
+            }
+
             if (!qr.ok)
                 co_return std::unexpected(PgOpError{qr.code, qr.error, qr.err_detail});
 
@@ -217,7 +275,7 @@ namespace usub::pg
                 auto vec = usub::pg::map_all_reflect_named<T>(qr);
                 co_return std::expected<std::vector<T>, PgOpError>{std::in_place, std::move(vec)};
             }
-            catch (...)
+            catch (const std::exception&)
             {
                 auto vec = usub::pg::map_all_reflect_positional<T>(qr);
                 co_return std::expected<std::vector<T>, PgOpError>{std::in_place, std::move(vec)};
@@ -233,8 +291,22 @@ namespace usub::pg
                     PgOpError{PgErrorCode::InvalidFuture, "transaction not active", {}}
                 );
 
-            QueryResult qr = co_await conn_->exec_param_query_nonblocking(
-                sql, std::forward<Args>(args)...);
+            QueryResult qr = co_await pool_->query_on(
+                conn_,
+                sql,
+                std::forward<Args>(args)...
+            );
+
+            if (is_fatal_connection_error(qr))
+            {
+                pool_->mark_dead(conn_);
+                conn_.reset();
+                active_ = false;
+                rolled_back_ = true;
+                committed_ = false;
+                co_return std::unexpected(PgOpError{qr.code, qr.error, qr.err_detail});
+            }
+
             if (!qr.ok)
                 co_return std::unexpected(PgOpError{qr.code, qr.error, qr.err_detail});
             if (qr.rows.empty())
@@ -247,7 +319,7 @@ namespace usub::pg
                 auto v = usub::pg::map_single_reflect_named<T>(qr, 0);
                 co_return std::expected<T, PgOpError>{std::in_place, std::move(v)};
             }
-            catch (...)
+            catch (const std::exception&)
             {
                 auto v = usub::pg::map_single_reflect_positional<T>(qr, 0);
                 co_return std::expected<T, PgOpError>{std::in_place, std::move(v)};
@@ -362,7 +434,12 @@ namespace usub::pg
             co_return bad;
         }
 
-        QueryResult qr = co_await pool_->query_on(conn_, sql, std::forward<Args>(args)...);
+        QueryResult qr = co_await pool_->query_on(
+            conn_,
+            sql,
+            std::forward<Args>(args)...
+        );
+
         if (is_fatal_connection_error(qr))
         {
             pool_->mark_dead(conn_);

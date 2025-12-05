@@ -11,6 +11,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0" CACHE STRING "Debug flags" FORCE)
 set(CMAKE_C_FLAGS_DEBUG "-g -O0" CACHE STRING "Debug flags" FORCE)
 
+option(UPQ_POOL_DEBUG OFF)
+
 add_compile_definitions(DEV_STAGE=${DEV_STAGE})
 
 message(STATUS "DEV_STAGE is set to ${DEV_STAGE}")
