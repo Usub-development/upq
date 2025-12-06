@@ -17,17 +17,11 @@
 #include "PgReflect.h"
 #include "uvent/utils/datastructures/queue/ConcurrentQueues.h"
 
-#ifndef UPQ_POOL_DEBUG
-#define UPQ_POOL_DEBUG 1
-#endif
-
 #if UPQ_POOL_DEBUG
 #define UPQ_POOL_DBG(fmt, ...) \
     do { std::fprintf(stderr, "[UPQ/pool] " fmt "\n", ##__VA_ARGS__); } while (0)
-#else
-#define UPQ_POOL_DBG(fmt, ...) \
-    do { } while (0)
 #endif
+
 
 namespace usub::pg
 {
@@ -109,8 +103,6 @@ namespace usub::pg
         [[deprecated]] usub::uvent::task::Awaitable<std::optional<T>>
         query_reflect_one(const std::string& sql);
 
-        // ---- EXPECTED, без параметров ----
-
         template <class T>
         usub::uvent::task::Awaitable<std::expected<std::vector<T>, PgOpError>>
         query_on_reflect_expected(std::shared_ptr<PgConnectionLibpq> const& conn,
@@ -127,7 +119,9 @@ namespace usub::pg
             }
             catch (const std::exception& e)
             {
+#if UPQ_POOL_DEBUG
                 UPQ_POOL_DBG("query_on_reflect_expected named-map FAIL: %s — fallback to positional", e.what());
+#endif
                 auto vec = usub::pg::map_all_reflect_positional<T>(qr);
                 co_return std::expected<std::vector<T>, PgOpError>{std::in_place, std::move(vec)};
             }
@@ -152,7 +146,9 @@ namespace usub::pg
             }
             catch (const std::exception& e)
             {
+#if UPQ_POOL_DEBUG
                 UPQ_POOL_DBG("query_on_reflect_expected_one named-one FAIL: %s — fallback to positional", e.what());
+#endif
                 auto v = usub::pg::map_single_reflect_positional<T>(qr, 0);
                 co_return std::expected<T, PgOpError>{std::in_place, std::move(v)};
             }
@@ -196,8 +192,6 @@ namespace usub::pg
             co_return res;
         }
 
-        // ---- EXPECTED, с параметрами ----
-
         template <class T, typename... Args>
         [[deprecated]] usub::uvent::task::Awaitable<std::vector<T>>
         query_on_reflect(std::shared_ptr<PgConnectionLibpq> const& conn,
@@ -232,7 +226,9 @@ namespace usub::pg
             }
             catch (const std::exception& e)
             {
+#if UPQ_POOL_DEBUG
                 UPQ_POOL_DBG("query_on_reflect_expected (param) named-map FAIL: %s — fallback to positional", e.what());
+#endif
                 auto vec = usub::pg::map_all_reflect_positional<T>(qr);
                 co_return std::expected<std::vector<T>, PgOpError>{std::in_place, std::move(vec)};
             }
@@ -257,7 +253,10 @@ namespace usub::pg
             }
             catch (const std::exception& e)
             {
-                UPQ_POOL_DBG("query_on_reflect_expected_one (param) named-one FAIL: %s — fallback to positional", e.what());
+#if UPQ_POOL_DEBUG
+                UPQ_POOL_DBG("query_on_reflect_expected_one (param) named-one FAIL: %s — fallback to positional",
+                             e.what());
+#endif
                 auto v = usub::pg::map_single_reflect_positional<T>(qr, 0);
                 co_return std::expected<T, PgOpError>{std::in_place, std::move(v)};
             }
@@ -340,8 +339,6 @@ namespace usub::pg
 
         usub::uvent::sync::AsyncSemaphore idle_sem_{0};
     };
-
-    // ---- templates реализации ----
 
     template <typename... Args>
     usub::uvent::task::Awaitable<QueryResult>
@@ -570,7 +567,6 @@ namespace usub::pg
 
         co_return qr;
     }
-
 } // namespace usub::pg
 
 #endif // PGPOOL_H

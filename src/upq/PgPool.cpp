@@ -23,9 +23,11 @@ namespace usub::pg
           , retries_on_connection_failed_(retries_on_connection_failed)
           , idle_sem_(0)
     {
+#if UPQ_POOL_DEBUG
         UPQ_POOL_DBG("ctor: host=%s port=%s user=%s db=%s max_pool=%zu retries=%d",
                      host_.c_str(), port_.c_str(), user_.c_str(), db_.c_str(),
                      max_pool_, retries_on_connection_failed_);
+#endif
     }
 
     PgPool::~PgPool() = default;
@@ -45,22 +47,28 @@ namespace usub::pg
 
                 if (!conn)
                 {
+#if UPQ_POOL_DEBUG
                     UPQ_POOL_DBG("acquire: got null conn from idle queue, dropping");
+#endif
                     continue;
                 }
 
                 if (!conn->connected())
                 {
+#if UPQ_POOL_DEBUG
                     UPQ_POOL_DBG("acquire: got bad idle conn=%p (disconnected), dropping",
                                  conn.get());
+#endif
                     mark_dead(conn);
                     continue;
                 }
 
                 if (!conn->is_idle())
                 {
+#if UPQ_POOL_DEBUG
                     UPQ_POOL_DBG("acquire: got non-idle from idle queue conn=%p, trying to drain",
                                  conn.get());
+#endif
 
                     bool pumped = co_await conn->pump_input();
                     if (pumped)
@@ -70,25 +78,32 @@ namespace usub::pg
 
                     if (!conn->connected())
                     {
+#if UPQ_POOL_DEBUG
                         UPQ_POOL_DBG("acquire: conn=%p disconnected after drain, dropping",
                                      conn.get());
+#endif
                         mark_dead(conn);
                         continue;
                     }
 
                     if (!conn->is_idle())
                     {
+#if UPQ_POOL_DEBUG
                         UPQ_POOL_DBG("acquire: conn=%p still non-idle after drain, dropping",
                                      conn.get());
+#endif
                         mark_dead(conn);
                         continue;
                     }
-
+#if UPQ_POOL_DEBUG
                     UPQ_POOL_DBG("acquire: conn=%p became idle after drain, reuse", conn.get());
+#endif
                 }
 
                 stats_.alive.fetch_add(1, std::memory_order_relaxed);
+#if UPQ_POOL_DEBUG
                 UPQ_POOL_DBG("acquire: reuse idle conn=%p", conn.get());
+#endif
 
                 co_return std::expected<std::shared_ptr<PgConnectionLibpq>, PgOpError>{
                     std::in_place, std::move(conn)
@@ -104,8 +119,10 @@ namespace usub::pg
                     std::memory_order_acq_rel,
                     std::memory_order_relaxed))
                 {
+#if UPQ_POOL_DEBUG
                     UPQ_POOL_DBG("acquire: creating new conn (live=%zu -> %zu)",
                                  cur_live, cur_live + 1);
+#endif
 
                     auto newConn = std::make_shared<PgConnectionLibpq>();
 
@@ -130,11 +147,13 @@ namespace usub::pg
                         }
 
                         last_err = err;
+#if UPQ_POOL_DEBUG
                         UPQ_POOL_DBG("acquire: new conn=%p connect_async failed (attempt %d/%d): %s",
                                      newConn.get(),
                                      attempt + 1,
                                      retries_on_connection_failed_,
                                      err->c_str());
+#endif
 
                         if (attempt + 1 < retries_on_connection_failed_)
                             co_await uvent::system::this_coroutine::sleep_for(100ms);
@@ -158,16 +177,18 @@ namespace usub::pg
                             {}
                         });
                     }
-
+#if UPQ_POOL_DEBUG
                     UPQ_POOL_DBG("acquire: new conn=%p ready", newConn.get());
+#endif
                     co_return std::expected<std::shared_ptr<PgConnectionLibpq>, PgOpError>{
                         std::in_place, std::move(newConn)
                     };
                 }
                 continue;
             }
-
+#if UPQ_POOL_DEBUG
             UPQ_POOL_DBG("acquire: no idle and at max live=%zu, waiting on idle_sem", cur_live);
+#endif
             co_await idle_sem_.acquire();
         }
     }
@@ -179,19 +200,25 @@ namespace usub::pg
 
         if (!conn->connected() || !conn->is_idle())
         {
+#if UPQ_POOL_DEBUG
             UPQ_POOL_DBG("release: conn=%p not idle or disconnected, mark_dead", conn.get());
+#endif
             mark_dead(conn);
             return;
         }
 
         if (!this->idle_.try_enqueue(conn))
         {
+#if UPQ_POOL_DEBUG
             UPQ_POOL_DBG("release: idle queue full for conn=%p, mark_dead", conn.get());
+#endif
             mark_dead(conn);
         }
         else
         {
+#if UPQ_POOL_DEBUG
             UPQ_POOL_DBG("release: enqueued conn=%p", conn.get());
+#endif
             idle_sem_.release();
         }
     }
@@ -206,7 +233,9 @@ namespace usub::pg
 
         if (!conn->connected())
         {
+#if UPQ_POOL_DEBUG
             UPQ_POOL_DBG("release_async: conn=%p disconnected, mark_dead", conn.get());
+#endif
             mark_dead(conn);
             co_return;
         }
@@ -219,20 +248,26 @@ namespace usub::pg
 
         if (!conn->connected() || !conn->is_idle())
         {
+#if UPQ_POOL_DEBUG
             UPQ_POOL_DBG("release_async: conn=%p not idle or disconnected after drain, mark_dead",
                          conn.get());
+#endif
             mark_dead(conn);
             co_return;
         }
 
         if (!this->idle_.try_enqueue(conn))
         {
+#if UPQ_POOL_DEBUG
             UPQ_POOL_DBG("release_async: idle queue full for conn=%p, mark_dead", conn.get());
+#endif
             mark_dead(conn);
         }
         else
         {
+#if UPQ_POOL_DEBUG
             UPQ_POOL_DBG("release_async: enqueued conn=%p", conn.get());
+#endif
             idle_sem_.release();
         }
 
@@ -243,9 +278,10 @@ namespace usub::pg
     {
         if (!conn)
             return;
-
+#if UPQ_POOL_DEBUG
         UPQ_POOL_DBG("mark_dead: conn=%p", conn.get());
         conn->close();
         this->live_count_.fetch_sub(1, std::memory_order_relaxed);
+#endif
     }
 } // namespace usub::pg
