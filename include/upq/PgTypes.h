@@ -428,6 +428,10 @@ namespace usub::pg {
 
             std::string& operator[](size_t i) noexcept { return cols[i]; }
 
+            [[nodiscard]] const std::string& at(size_t i) const { return this->cols.at(i); }
+
+            [[nodiscard]] std::string& at(size_t i) noexcept { return this->cols.at(i); }
+
             [[nodiscard]] inline size_t size() const noexcept { return this->cols.size(); }
             [[nodiscard]] inline bool empty() const noexcept { return this->cols.empty(); }
 
@@ -473,6 +477,10 @@ namespace usub::pg {
         const Row& operator[](size_t i) const noexcept { return this->rows[i]; }
 
         Row& operator[](size_t i) noexcept { return this->rows[i]; }
+
+        [[nodiscard]] const Row& at(size_t i) const { return this->rows.at(i); }
+
+        [[nodiscard]] Row& at(size_t i) noexcept { return this->rows.at(i); }
 
         bool ok{false};
         PgErrorCode code{PgErrorCode::Unknown};
