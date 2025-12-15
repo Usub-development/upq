@@ -204,6 +204,77 @@ namespace usub::pg
 
     namespace detail
     {
+        // ===== forward decls (важно для 2-phase lookup) =====
+
+        inline void encode_one(ParamSlices& ps, bool v);
+
+        template <Integral T>
+        inline void encode_one(ParamSlices& ps, T v);
+
+        inline void encode_one(ParamSlices& ps, float v);
+        inline void encode_one(ParamSlices& ps, double v);
+
+        inline void encode_one(ParamSlices& ps, std::string_view v);
+        inline void encode_one(ParamSlices& ps, const std::string& v);
+
+        template <size_t N>
+        inline void encode_one(ParamSlices& ps, const char (&lit)[N]);
+
+        inline void encode_one(ParamSlices& ps, const char* v);
+
+        template <EnumType E>
+        inline void encode_one(ParamSlices& ps, E v);
+
+        template <ArrayLike C>
+        inline void encode_one(ParamSlices& ps, const C& cont);
+
+        template <class T, class A>
+        inline void encode_one(ParamSlices& ps, const std::vector<T, A>& cont);
+
+        template <class T, size_t N>
+        inline void encode_one(ParamSlices& ps, const T (&arr)[N]);
+
+        template <class T, size_t N>
+        inline void encode_one(ParamSlices& ps, T (&arr)[N]);
+
+        template <class T>
+        inline void encode_one(ParamSlices& ps, std::initializer_list<T> il);
+
+        template <class Tup>
+            requires (::usub::pg::detail::is_tuple_like_v<std::decay_t<Tup>>
+                && !ArrayLike<std::decay_t<Tup>>
+                && !CArrayLike<std::decay_t<Tup>>)
+        inline void encode_one(ParamSlices& ps, const Tup& tup);
+
+        template <class T>
+            requires (::usub::pg::detail::ReflectAggregate<std::decay_t<T>>
+                && !::usub::pg::detail::is_tuple_like_v<std::decay_t<T>>
+                && !ArrayLike<std::decay_t<T>>
+                && !CArrayLike<std::decay_t<T>>)
+        inline void encode_one(ParamSlices& ps, const T& obj);
+
+        template <class T>
+            requires (!Integral<std::decay_t<T>> &&
+                !Floating<std::decay_t<T>> &&
+                !StringLike<std::decay_t<T>> &&
+                !CharPtr<std::decay_t<T>> &&
+                !Optional<std::decay_t<T>> &&
+                !ArrayLike<std::decay_t<T>> &&
+                !CArrayLike<std::decay_t<T>> &&
+                !AssociativeLike<std::decay_t<T>> &&
+                !InitList<std::decay_t<T>> &&
+                !EnumType<std::decay_t<T>> &&
+                !ReflectAggregate<std::decay_t<T>> &&
+                !is_tuple_like_v<std::decay_t<T>> &&
+                !std::is_same_v<std::decay_t<T>, bool>)
+        inline void encode_one(ParamSlices& ps, T&& v);
+
+        template <class Opt>
+            requires Optional<std::decay_t<Opt>>
+        inline void encode_one(ParamSlices& ps, Opt&& ov);
+
+        // ===================== scalars =====================
+
         inline void encode_one(ParamSlices& ps, bool v) { ps.set_bin_bool(v); }
 
         template <Integral T>
@@ -235,6 +306,8 @@ namespace usub::pg
             else ps.set_null();
         }
 
+        // ===================== enum =====================
+
         template <EnumType E>
         inline void encode_one(ParamSlices& ps, E v)
         {
@@ -253,17 +326,7 @@ namespace usub::pg
                 ps.set_bin_integral<uint64_t>(static_cast<uint64_t>(static_cast<U>(v)), detail::INT8OID);
         }
 
-        template <class Opt>
-            requires Optional<std::decay_t<Opt>>
-        inline void encode_one(ParamSlices& ps, Opt&& ov)
-        {
-            if (!ov)
-            {
-                ps.set_null();
-                return;
-            }
-            encode_one(ps, *ov);
-        }
+        // ===================== array helpers =====================
 
         inline std::string escape_pg_array_elem(std::string_view in)
         {
@@ -386,8 +449,17 @@ namespace usub::pg
             return s;
         }
 
+        // ===================== ArrayLike / vector / C-array / init_list =====================
+
         template <ArrayLike C>
         inline void encode_one(ParamSlices& ps, const C& cont)
+        {
+            const std::string s = build_pg_text_array_literal_any(cont);
+            ps.set_text_typed(s, 0);
+        }
+
+        template <class T, class A>
+        inline void encode_one(ParamSlices& ps, const std::vector<T, A>& cont)
         {
             const std::string s = build_pg_text_array_literal_any(cont);
             ps.set_text_typed(s, 0);
@@ -421,6 +493,8 @@ namespace usub::pg
             ps.set_text_typed(s, 0);
         }
 
+        // ===================== tuple =====================
+
         template <class Tup>
             requires (::usub::pg::detail::is_tuple_like_v<std::decay_t<Tup>>
                 && !ArrayLike<std::decay_t<Tup>>
@@ -433,6 +507,8 @@ namespace usub::pg
                 (encode_one(ps, std::get<I>(tup)), ...);
             }(std::make_index_sequence<std::tuple_size_v<DT>>{});
         }
+
+        // ===================== reflect aggregate =====================
 
         template <class T>
             requires (::usub::pg::detail::ReflectAggregate<std::decay_t<T>>
@@ -450,6 +526,8 @@ namespace usub::pg
             }(std::make_index_sequence<ureflect::count_members<V>>{});
         }
 
+        // ===================== fallback =====================
+
         template <class T>
             requires (!Integral<std::decay_t<T>> &&
                 !Floating<std::decay_t<T>> &&
@@ -462,7 +540,8 @@ namespace usub::pg
                 !InitList<std::decay_t<T>> &&
                 !EnumType<std::decay_t<T>> &&
                 !ReflectAggregate<std::decay_t<T>> &&
-                !is_tuple_like_v<std::decay_t<T>>)
+                !is_tuple_like_v<std::decay_t<T>> &&
+                !std::is_same_v<std::decay_t<T>, bool>)
         inline void encode_one(ParamSlices& ps, T&& v)
         {
             if constexpr (std::is_convertible_v<T, std::string_view>)
@@ -482,6 +561,22 @@ namespace usub::pg
                 ps.set_text(oss.str());
             }
         }
+
+        // ===================== Optional (в конце, после всех overload'ов) =====================
+
+        template <class Opt>
+            requires Optional<std::decay_t<Opt>>
+        inline void encode_one(ParamSlices& ps, Opt&& ov)
+        {
+            if (!ov)
+            {
+                ps.set_null();
+                return;
+            }
+            encode_one(ps, *ov);
+        }
+
+        // ===================== param arity =====================
 
         template <class T>
         struct param_arity_impl
@@ -546,6 +641,7 @@ namespace usub::pg
             return (param_arity<Args>::value + ... + 0);
         }
     } // namespace detail
+
 
     class PgConnectionLibpq
     {
