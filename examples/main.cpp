@@ -1424,25 +1424,25 @@ task::Awaitable<void> test_enum_support(usub::pg::PgPool& pool)
     }
 
     {
-        auto rows = co_await pool.query_reflect<EnumRow>(
+        auto rows = co_await pool.query_reflect_expected<EnumRow>(
             "SELECT id, name, kind, alt_kind, kinds FROM users_enum WHERE kind = $1 ORDER BY id",
             RoleKind::user);
-        std::cout << "[ENUM/FILTER kind=user] n=" << rows.size() << "\n";
+        std::cout << "[ENUM/FILTER kind=user] n=" << rows.value().size() << "\n";
     }
 
     {
-        auto rows = co_await pool.query_reflect<EnumRow>(
+        auto rows = co_await pool.query_reflect_expected<EnumRow>(
             "SELECT id, name, kind, alt_kind, kinds FROM users_enum WHERE alt_kind IS NULL ORDER BY id");
-        std::cout << "[ENUM/FILTER alt_kind IS NULL] n=" << rows.size() << "\n";
+        std::cout << "[ENUM/FILTER alt_kind IS NULL] n=" << rows->size() << "\n";
     }
 
     {
         std::vector<RoleKind> need{RoleKind::admin, RoleKind::guest};
-        auto rows = co_await pool.query_reflect<EnumRow>(
+        auto rows = co_await pool.query_reflect_expected<EnumRow>(
             "SELECT id, name, kind, alt_kind, kinds FROM users_enum "
             "WHERE kinds && $1::text[] ORDER BY id",
             need);
-        std::cout << "[ENUM/OVERLAP kinds] n=" << rows.size() << "\n";
+        std::cout << "[ENUM/OVERLAP kinds] n=" << rows.value().size() << "\n";
     }
 
     co_return;

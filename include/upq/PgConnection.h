@@ -44,16 +44,16 @@ namespace usub::pg
         if (!res) return;
 
         const char* sqlstate = PQresultErrorField(res, PG_DIAG_SQLSTATE);
-        const char* primary  = PQresultErrorField(res, PG_DIAG_MESSAGE_PRIMARY);
-        const char* detail   = PQresultErrorField(res, PG_DIAG_MESSAGE_DETAIL);
-        const char* hint     = PQresultErrorField(res, PG_DIAG_MESSAGE_HINT);
+        const char* primary = PQresultErrorField(res, PG_DIAG_MESSAGE_PRIMARY);
+        const char* detail = PQresultErrorField(res, PG_DIAG_MESSAGE_DETAIL);
+        const char* hint = PQresultErrorField(res, PG_DIAG_MESSAGE_HINT);
 
         if (primary && *primary) out.error = primary;
         else if (const char* fb = PQresultErrorMessage(res); fb && *fb) out.error = fb;
 
         if (sqlstate) out.err_detail.sqlstate = sqlstate;
-        if (detail)   out.err_detail.detail   = detail;
-        if (hint)     out.err_detail.hint     = hint;
+        if (detail) out.err_detail.detail = detail;
+        if (hint) out.err_detail.hint = hint;
 
         if (primary && *primary) out.err_detail.message = primary;
         else if (!out.error.empty()) out.err_detail.message = out.error;
@@ -209,13 +209,17 @@ namespace usub::pg
         template <Integral T>
         inline void encode_one(ParamSlices& ps, T v)
         {
-            if constexpr (sizeof(T) <= 2) ps.set_bin_integral<int16_t>(static_cast<int16_t>(v), detail::INT2OID);
-            else if constexpr (sizeof(T) == 4) ps.set_bin_integral<int32_t>(static_cast<int32_t>(v), detail::INT4OID);
-            else ps.set_bin_integral<int64_t>(static_cast<int64_t>(v), detail::INT8OID);
+            if constexpr (sizeof(T) <= 2)
+                ps.set_bin_integral<int16_t>(static_cast<int16_t>(v), detail::INT2OID);
+            else if constexpr (sizeof(T) == 4)
+                ps.set_bin_integral<int32_t>(static_cast<int32_t>(v), detail::INT4OID);
+            else
+                ps.set_bin_integral<int64_t>(static_cast<int64_t>(v), detail::INT8OID);
         }
 
         inline void encode_one(ParamSlices& ps, float v) { ps.set_bin_f32(v); }
         inline void encode_one(ParamSlices& ps, double v) { ps.set_bin_f64(v); }
+
         inline void encode_one(ParamSlices& ps, std::string_view v) { ps.set_text(v); }
         inline void encode_one(ParamSlices& ps, const std::string& v) { ps.set_text(v); }
 
@@ -249,6 +253,18 @@ namespace usub::pg
                 ps.set_bin_integral<uint64_t>(static_cast<uint64_t>(static_cast<U>(v)), detail::INT8OID);
         }
 
+        template <class Opt>
+            requires Optional<std::decay_t<Opt>>
+        inline void encode_one(ParamSlices& ps, Opt&& ov)
+        {
+            if (!ov)
+            {
+                ps.set_null();
+                return;
+            }
+            encode_one(ps, *ov);
+        }
+
         inline std::string escape_pg_array_elem(std::string_view in)
         {
             std::string out;
@@ -276,6 +292,7 @@ namespace usub::pg
             oss << v;
             return oss.str();
         }
+
         inline std::string to_text_number(double v)
         {
             std::ostringstream oss;
@@ -283,8 +300,60 @@ namespace usub::pg
             return oss.str();
         }
 
-        template <class Range, class Elem>
-        inline std::string build_pg_text_array_literal(const Range& cont)
+        template <class Elem>
+        inline void append_pg_array_elem(std::string& s, const Elem& v)
+        {
+            if constexpr (EnumType<Elem>)
+            {
+                std::string tok;
+                if (!enum_to_token_impl<Elem>(v, tok))
+                {
+                    using U = std::underlying_type_t<Elem>;
+                    tok = std::to_string(static_cast<U>(v));
+                }
+                s.push_back('"');
+                s.append(escape_pg_array_elem(tok));
+                s.push_back('"');
+            }
+            else if constexpr (std::is_same_v<std::decay_t<Elem>, bool>)
+            {
+                s.append(v ? "true" : "false");
+            }
+            else if constexpr (StringLike<Elem> || std::is_same_v<std::decay_t<Elem>, std::string_view>)
+            {
+                std::string_view sv(v);
+                s.push_back('"');
+                s.append(escape_pg_array_elem(sv));
+                s.push_back('"');
+            }
+            else if constexpr (CharPtr<Elem>)
+            {
+                const char* p = v;
+                std::string_view sv = p ? std::string_view(p) : std::string_view{};
+                s.push_back('"');
+                s.append(escape_pg_array_elem(sv));
+                s.push_back('"');
+            }
+            else if constexpr (Integral<Elem>)
+            {
+                s.append(to_text_number(v));
+            }
+            else if constexpr (Floating<Elem>)
+            {
+                s.append(to_text_number((double)v));
+            }
+            else
+            {
+                std::ostringstream oss;
+                oss << v;
+                s.push_back('"');
+                s.append(escape_pg_array_elem(oss.str()));
+                s.push_back('"');
+            }
+        }
+
+        template <class Range>
+        inline std::string build_pg_text_array_literal_any(const Range& cont)
         {
             std::string s;
             s.push_back('{');
@@ -292,69 +361,24 @@ namespace usub::pg
 
             for (auto&& e0 : cont)
             {
-                if constexpr (Optional<std::decay_t<decltype(e0)>>)
-                {
-                    if (!e0) continue;
-                }
-
-                auto getv = [&]() -> const Elem& {
-                    if constexpr (Optional<std::decay_t<decltype(e0)>>) return *e0;
-                    else return (const Elem&)e0;
-                };
-
-                const Elem& v = getv();
-
                 if (!first) s.push_back(',');
                 first = false;
 
-                if constexpr (EnumType<Elem>)
+                using E0 = std::decay_t<decltype(e0)>;
+                if constexpr (Optional<E0>)
                 {
-                    std::string tok;
-                    if (!enum_to_token_impl<Elem>(v, tok))
+                    if (!e0)
                     {
-                        using U = std::underlying_type_t<Elem>;
-                        tok = std::to_string(static_cast<U>(v));
+                        s.append("NULL");
+                        continue;
                     }
-                    s.push_back('"');
-                    auto esc = escape_pg_array_elem(tok);
-                    s.append(esc);
-                    s.push_back('"');
-                }
-                else if constexpr (StringLike<Elem> || std::is_same_v<std::decay_t<Elem>, std::string_view>)
-                {
-                    std::string_view sv(v);
-                    s.push_back('"');
-                    auto esc = escape_pg_array_elem(sv);
-                    s.append(esc);
-                    s.push_back('"');
-                }
-                else if constexpr (CharPtr<Elem>)
-                {
-                    const char* p = v;
-                    std::string_view sv = p ? std::string_view(p) : std::string_view{};
-                    s.push_back('"');
-                    auto esc = escape_pg_array_elem(sv);
-                    s.append(esc);
-                    s.push_back('"');
-                }
-                else if constexpr (Integral<Elem>)
-                {
-                    auto t = to_text_number(v);
-                    s.append(t);
-                }
-                else if constexpr (Floating<Elem>)
-                {
-                    auto t = to_text_number((double)v);
-                    s.append(t);
+                    using Elem = unopt_t<E0>;
+                    append_pg_array_elem<Elem>(s, *e0);
                 }
                 else
                 {
-                    std::ostringstream oss;
-                    oss << v;
-                    s.push_back('"');
-                    auto esc = escape_pg_array_elem(oss.str());
-                    s.append(esc);
-                    s.push_back('"');
+                    using Elem = std::decay_t<decltype(e0)>;
+                    append_pg_array_elem<Elem>(s, e0);
                 }
             }
 
@@ -365,45 +389,23 @@ namespace usub::pg
         template <ArrayLike C>
         inline void encode_one(ParamSlices& ps, const C& cont)
         {
-            using Elem0 = typename C::value_type;
-            using Elem  = unopt_t<Elem0>;
-
-            if constexpr (EnumType<Elem> || Integral<Elem> || Floating<Elem> || StringLike<Elem> || CharPtr<Elem>)
-            {
-                const std::string s = build_pg_text_array_literal<C, Elem>(cont);
-                ps.set_text_typed(s, 0);
-            }
-            else
-            {
-                constexpr Oid arr_oid = pick_array_oid<Elem>();
-                const std::string s = build_pg_array_from_range(cont);
-                ps.set_text_typed(s, arr_oid);
-            }
+            const std::string s = build_pg_text_array_literal_any(cont);
+            ps.set_text_typed(s, 0);
         }
 
         template <class T, size_t N>
         inline void encode_one(ParamSlices& ps, const T (&arr)[N])
         {
-            using Elem = unopt_t<T>;
-
-            if constexpr (EnumType<Elem> || Integral<Elem> || Floating<Elem> || StringLike<Elem> || CharPtr<Elem>)
+            struct PtrRange
             {
-                struct PtrRange {
-                    const T* b;
-                    const T* e;
-                    const T* begin() const { return b; }
-                    const T* end()   const { return e; }
-                } r{arr, arr + N};
+                const T* b;
+                const T* e;
+                const T* begin() const { return b; }
+                const T* end() const { return e; }
+            } r{arr, arr + N};
 
-                const std::string s = build_pg_text_array_literal<PtrRange, Elem>(r);
-                ps.set_text_typed(s, 0);
-            }
-            else
-            {
-                constexpr Oid arr_oid = pick_array_oid<Elem>();
-                const std::string s = build_pg_array_from_carray(arr);
-                ps.set_text_typed(s, arr_oid);
-            }
+            const std::string s = build_pg_text_array_literal_any(r);
+            ps.set_text_typed(s, 0);
         }
 
         template <class T, size_t N>
@@ -415,19 +417,8 @@ namespace usub::pg
         template <class T>
         inline void encode_one(ParamSlices& ps, std::initializer_list<T> il)
         {
-            using Elem = unopt_t<T>;
-
-            if constexpr (EnumType<Elem> || Integral<Elem> || Floating<Elem> || StringLike<Elem> || CharPtr<Elem>)
-            {
-                const std::string s = build_pg_text_array_literal<std::initializer_list<T>, Elem>(il);
-                ps.set_text_typed(s, 0);
-            }
-            else
-            {
-                constexpr Oid arr_oid = pick_array_oid<Elem>();
-                const std::string s = build_pg_array_from_range(il);
-                ps.set_text_typed(s, arr_oid);
-            }
+            const std::string s = build_pg_text_array_literal_any(il);
+            ps.set_text_typed(s, 0);
         }
 
         template <class Tup>
@@ -459,32 +450,25 @@ namespace usub::pg
             }(std::make_index_sequence<ureflect::count_members<V>>{});
         }
 
-        template <Optional Opt>
-        inline void encode_one(ParamSlices& ps, Opt&& ov)
-        {
-            if (!ov)
-            {
-                ps.set_null();
-                return;
-            }
-            encode_one(ps, *ov);
-        }
-
         template <class T>
-            requires (!Integral<T> && !Floating<T> && !StringLike<T> && !CharPtr<T> &&
-                !Optional<T> && !ArrayLike<T> && !CArrayLike<T> &&
-                !AssociativeLike<T> && !std::is_same_v<std::decay_t<T>, bool> &&
-                !InitList<T> && !EnumType<T>)
+            requires (!Integral<std::decay_t<T>> &&
+                !Floating<std::decay_t<T>> &&
+                !StringLike<std::decay_t<T>> &&
+                !CharPtr<std::decay_t<T>> &&
+                !Optional<std::decay_t<T>> &&
+                !ArrayLike<std::decay_t<T>> &&
+                !CArrayLike<std::decay_t<T>> &&
+                !AssociativeLike<std::decay_t<T>> &&
+                !InitList<std::decay_t<T>> &&
+                !EnumType<std::decay_t<T>> &&
+                !ReflectAggregate<std::decay_t<T>> &&
+                !is_tuple_like_v<std::decay_t<T>>)
         inline void encode_one(ParamSlices& ps, T&& v)
         {
             if constexpr (std::is_convertible_v<T, std::string_view>)
                 ps.set_text(std::string_view(v));
             else if constexpr (std::is_constructible_v<std::string, T>)
                 ps.set_text(std::string(std::forward<T>(v)));
-            else if constexpr (std::is_pointer_v<std::decay_t<T>>)
-            {
-                static_assert(!std::is_pointer_v<std::decay_t<T>>, "Unsupported pointer parameter");
-            }
             else if constexpr (Streamable<T>)
             {
                 std::ostringstream oss;
@@ -500,45 +484,67 @@ namespace usub::pg
         }
 
         template <class T>
-        struct param_arity_impl { static constexpr size_t value = 1; };
+        struct param_arity_impl
+        {
+            static constexpr size_t value = 1;
+        };
 
-        template <class Opt> requires Optional<Opt>
+        template <class Opt>
+            requires Optional<std::decay_t<Opt>>
         struct param_arity_impl<Opt>
         {
             using Inner = typename std::decay_t<Opt>::value_type;
             static constexpr size_t value = param_arity_impl<Inner>::value;
         };
 
-        template <class C> requires ArrayLike<C>
-        struct param_arity_impl<C> { static constexpr size_t value = 1; };
+        template <class C>
+            requires ArrayLike<std::decay_t<C>>
+        struct param_arity_impl<C>
+        {
+            static constexpr size_t value = 1;
+        };
 
         template <class T, size_t N>
-        struct param_arity_impl<T[N]> { static constexpr size_t value = 1; };
+        struct param_arity_impl<T[N]>
+        {
+            static constexpr size_t value = 1;
+        };
 
         template <class T>
-        struct param_arity_impl<std::initializer_list<T>> { static constexpr size_t value = 1; };
+        struct param_arity_impl<std::initializer_list<T>>
+        {
+            static constexpr size_t value = 1;
+        };
 
         template <class Tup>
-            requires (::usub::pg::detail::is_tuple_like_v<Tup> && !ArrayLike<Tup> && !CArrayLike<Tup>)
+            requires (::usub::pg::detail::is_tuple_like_v<std::decay_t<Tup>>
+                && !ArrayLike<std::decay_t<Tup>>
+                && !CArrayLike<std::decay_t<Tup>>)
         struct param_arity_impl<Tup>
         {
             static constexpr size_t value = std::tuple_size_v<std::decay_t<Tup>>;
         };
 
         template <class T>
-            requires (::usub::pg::detail::ReflectAggregate<T>
-                && !::usub::pg::detail::is_tuple_like_v<T>
-                && !ArrayLike<T> && !CArrayLike<T>)
+            requires (::usub::pg::detail::ReflectAggregate<std::decay_t<T>>
+                && !::usub::pg::detail::is_tuple_like_v<std::decay_t<T>>
+                && !ArrayLike<std::decay_t<T>>
+                && !CArrayLike<std::decay_t<T>>)
         struct param_arity_impl<T>
         {
             static constexpr size_t value = ureflect::count_members<std::decay_t<T>>;
         };
 
         template <class T>
-        struct param_arity : param_arity_impl<std::decay_t<T>> {};
+        struct param_arity : param_arity_impl<std::decay_t<T>>
+        {
+        };
 
         template <class... Args>
-        constexpr size_t count_total_params() { return (param_arity<Args>::value + ... + 0); }
+        constexpr size_t count_total_params()
+        {
+            return (param_arity<Args>::value + ... + 0);
+        }
     } // namespace detail
 
     class PgConnectionLibpq
