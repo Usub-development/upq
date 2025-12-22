@@ -90,10 +90,6 @@ if (UPQ_BUILD_EXAMPLES)
         add_executable(upq_example_timeout examples/main_timeout.cpp)
         target_link_libraries(upq_example_timeout PRIVATE upq)
         target_compile_definitions(upq_example_timeout PRIVATE DEV_STAGE=${DEV_STAGE})
-
-        add_executable(upq_example_json examples/main_json.cpp)
-        target_link_libraries(upq_example_json PRIVATE upq)
-        target_compile_definitions(upq_example_json PRIVATE DEV_STAGE=${DEV_STAGE})
 endif()
 
 install(TARGETS upq

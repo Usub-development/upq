@@ -1,6 +1,7 @@
 # JSON (ujson)
 
 UPQ supports:
+
 - writing C++ structs into `JSONB/JSON` via query parameters
 - reading `JSONB/JSON` into C++ structs via `PgJson<T, Strict>`
 - strict vs non-strict parsing (unknown keys, etc.)
@@ -41,6 +42,75 @@ PgJsonParam<T, Strict, false> pg_json (const T& v);
 ```
 
 Use `pg_jsonb()` in almost all cases.
+
+## Serialization (C++ → JSON/JSONB)
+
+UPQ serializes C++ objects into JSON by calling `ujson::dump(obj)` inside the parameter encoder and sends the result as
+a typed parameter:
+
+- `pg_jsonb(obj)` → parameter type `JSONBOID` (JSONB)
+- `pg_json(obj)`  → parameter type `JSONOID`  (JSON)
+
+### Serialize a struct into JSONB (recommended)
+
+```cpp
+Profile p{ .age = 27, .city = std::string("AMS"), .flags = {"a","b"} };
+
+auto r = co_await pool.exec_reflect(
+    "INSERT INTO users_json_demo(username, profile) VALUES($1,$2)",
+    std::tuple{std::string("kirill"), usub::pg::pg_jsonb(p)}
+);
+
+if (!r.ok) std::cerr << r.error << "\n";
+````
+
+### Serialize into JSON (not JSONB)
+
+```cpp
+Profile p{ .age = 1, .city = std::nullopt, .flags = {"x"} };
+
+auto r = co_await pool.exec_reflect(
+    "INSERT INTO users_json_demo(username, profile_json) VALUES($1,$2)",
+    std::tuple{std::string("json"), usub::pg::pg_json(p)}
+);
+```
+
+### Bind JSON parameters without tuples
+
+If your `exec_reflect` supports direct argument passing, this is equivalent:
+
+```cpp
+Profile p{ .age = 27, .city = std::string("AMS"), .flags = {"a","b"} };
+
+auto r = co_await pool.exec_reflect(
+    "INSERT INTO users_json_demo(username, profile) VALUES($1,$2)",
+    "kirill", usub::pg::pg_jsonb(p)
+);
+```
+
+### Important details
+
+* Serialization uses `ujson::dump()` (string JSON).
+* The parameter is sent as **text format** with an explicit OID (`JSONBOID` / `JSONOID`).
+* `Strict` in `PgJsonParam<T, Strict, ...>` currently does **not** change serialization; it matters on **decode** (
+  `PgJson<T, Strict>`).
+* If you insert broken JSON from SQL directly, Postgres will accept it as valid JSONB, but strict decoding may fail
+  later.
+
+### Custom JSON text (pre-serialized)
+
+If you already have JSON text, just pass it as `std::string` and cast in SQL:
+
+```cpp
+std::string raw = R"({"age":1,"city":"A","flags":["x"]})";
+
+auto r = co_await pool.exec_reflect(
+    "INSERT INTO users_json_demo(username, profile) VALUES($1, $2::jsonb)",
+    std::tuple{std::string("raw"), raw}
+);
+```
+
+This bypasses struct serialization.
 
 ---
 
@@ -208,8 +278,6 @@ usub::uvent::task::Awaitable<void> demo_pgjson_ujson(usub::pg::PgPool& pool) {
 }
 ```
 
----
-
 ## Notes on debug logs
 
 If you see logs like:
@@ -217,6 +285,8 @@ If you see logs like:
 * `fields: [age] [city] [flags]`
 * `key='UNKNOWN' ...`
 
-that is your **ujson/reflect debug output** for strict parsing on a payload containing an unknown key. It’s expected while strict parsing is failing.
+that is your **ujson/reflect debug output** for strict parsing on a payload containing an unknown key. It’s expected
+while strict parsing is failing.
 
-To silence it, disable your debug macro(s) in ujson / reflect layer (whatever emits those prints), or gate them behind a compile-time flag.
+To silence it, disable your debug macro(s) in ujson / reflect layer (whatever emits those prints), or gate them behind a
+compile-time flag.
