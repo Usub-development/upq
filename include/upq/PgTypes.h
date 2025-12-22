@@ -23,6 +23,8 @@
 #include <utility>
 #include <vector>
 
+#include <ujson/ujson.h>
+
 #include "ureflect/ureflect_auto.h"
 #include "uvent/Uvent.h"
 #include "uvent/utils/sync/RefCountedSession.h"
@@ -46,25 +48,25 @@ namespace usub::pg {
 
     // High-level server-side error classification, derived from SQLSTATE.
     enum class PgSqlStateClass : uint8_t {
-        None = 0,              // no sqlstate / not an error
-        ConnectionError,       // 08***, connection failures etc.
-        SyntaxError,           // 42*** (syntax/access rule)
-        UndefinedObject,       // e.g. 42P01 (relation does not exist)
-        ConstraintViolation,   // 23*** generic integrity violation
-        UniqueViolation,       // 23505
-        CheckViolation,        // 23514
-        NotNullViolation,      // 23502
-        ForeignKeyViolation,   // 23503
-        Deadlock,              // 40P01
-        SerializationFailure,  // 40001
-        PrivilegeError,        // 42501 / 28***
-        DataException,         // 22***
-        TransactionState,      // 25*** / 40*** rollback
-        InternalError,         // XX***
-        Other                  // fallback
+        None = 0, // no sqlstate / not an error
+        ConnectionError, // 08***, connection failures etc.
+        SyntaxError, // 42*** (syntax/access rule)
+        UndefinedObject, // e.g. 42P01 (relation does not exist)
+        ConstraintViolation, // 23*** generic integrity violation
+        UniqueViolation, // 23505
+        CheckViolation, // 23514
+        NotNullViolation, // 23502
+        ForeignKeyViolation, // 23503
+        Deadlock, // 40P01
+        SerializationFailure, // 40001
+        PrivilegeError, // 42501 / 28***
+        DataException, // 22***
+        TransactionState, // 25*** / 40*** rollback
+        InternalError, // XX***
+        Other // fallback
     };
 
-    inline const char* toString(PgErrorCode code) noexcept {
+    inline const char *toString(PgErrorCode code) noexcept {
         switch (code) {
             case PgErrorCode::OK:
                 return "OK";
@@ -88,13 +90,15 @@ namespace usub::pg {
                 return "AuthFailed";
             case PgErrorCode::AwaitCanceled:
                 return "AwaitCanceled";
+            case PgErrorCode::TooManyConnections:
+                return "TooManyConnections";
             case PgErrorCode::Unknown:
                 return "Unknown";
         }
         return "InvalidPgErrorCode";
     }
 
-    inline const char* toString(PgSqlStateClass cls) noexcept {
+    inline const char *toString(PgSqlStateClass cls) noexcept {
         switch (cls) {
             case PgSqlStateClass::None:
                 return "None";
@@ -168,85 +172,95 @@ namespace usub::pg {
         constexpr Oid FLOAT4ARRAYOID = 1021;
         constexpr Oid FLOAT8ARRAYOID = 1022;
 
-        template <class T>
+        // JSON OIDs
+        constexpr Oid JSONOID = 114;
+        constexpr Oid JSONBOID = 3802;
+
+        template<class T>
         using Decay = std::decay_t<T>;
 
         // scalar concepts
-        template <class T>
+        template<class T>
         concept StringLike =
-            std::is_same_v<Decay<T>, std::string> || std::is_same_v<Decay<T>, std::string_view>;
+                std::is_same_v<Decay<T>, std::string> || std::is_same_v<Decay<T>, std::string_view>;
 
-        template <class T>
-        concept CharPtr = std::is_same_v<Decay<T>, const char*> || std::is_same_v<Decay<T>, char*>;
+        template<class T>
+        concept CharPtr = std::is_same_v<Decay<T>, const char *> || std::is_same_v<Decay<T>, char *>;
 
-        template <class T>
-        concept Integral = std::is_integral_v<Decay<T>> && !std::is_same_v<Decay<T>, bool>;
-        template <class T>
-        concept Floating = std::is_floating_point_v<Decay<T>>;
-        template <class T>
-        concept EnumType = std::is_enum_v<std::decay_t<T>>;
+        template<class T>
+        concept Integral = std::is_integral_v<Decay<T> > && !std::is_same_v<Decay<T>, bool>;
+        template<class T>
+        concept Floating = std::is_floating_point_v<Decay<T> >;
+        template<class T>
+        concept EnumType = std::is_enum_v<std::decay_t<T> >;
 
-        template <class T>
+        template<class T>
         concept Optional = requires { typename Decay<T>::value_type; } &&
-                           std::is_same_v<Decay<T>, std::optional<typename Decay<T>::value_type>>;
+                           std::is_same_v<Decay<T>, std::optional<typename Decay<T>::value_type> >;
 
-        template <class T>
-        concept Streamable = requires(std::ostream& os, const T& v) {
-            { os << v } -> std::same_as<std::ostream&>;
+        template<class T>
+        concept Streamable = requires(std::ostream &os, const T &v)
+        {
+            { os << v } -> std::same_as<std::ostream &>;
         };
 
         // container detectors
-        template <class, class = void>
-        struct has_mapped_type : std::false_type {};
+        template<class, class = void>
+        struct has_mapped_type : std::false_type {
+        };
 
-        template <class T>
-        struct has_mapped_type<T, std::void_t<typename T::mapped_type>> : std::true_type {};
+        template<class T>
+        struct has_mapped_type<T, std::void_t<typename T::mapped_type> > : std::true_type {
+        };
 
-        template <class T>
+        template<class T>
         inline constexpr bool has_mapped_type_v = has_mapped_type<T>::value;
 
-        template <class T>
+        template<class T>
         concept AssociativeLike =
-            has_mapped_type_v<Decay<T>> || (requires { typename Decay<T>::key_type; });
+                has_mapped_type_v<Decay<T> > || (requires { typename Decay<T>::key_type; });
 
-        template <class T>
-        concept HasBeginEnd = requires(T& t) {
+        template<class T>
+        concept HasBeginEnd = requires(T &t)
+        {
             { std::begin(t) } -> std::input_or_output_iterator;
             { std::end(t) } -> std::sentinel_for<decltype(std::begin(t))>;
         };
 
-        template <class T>
-        concept HasSize = requires(const T& t) {
+        template<class T>
+        concept HasSize = requires(const T &t)
+        {
             { t.size() } -> std::convertible_to<size_t>;
         };
 
         // init_list detector to exclude from ArrayLike
-        template <class T>
-        concept InitList = requires {
+        template<class T>
+        concept InitList = requires
+        {
             typename Decay<T>::value_type;
-        } && std::is_same_v<Decay<T>, std::initializer_list<typename Decay<T>::value_type>>;
+        } && std::is_same_v<Decay<T>, std::initializer_list<typename Decay<T>::value_type> >;
 
-        template <class T>
+        template<class T>
         concept ArrayLike =
-            HasBeginEnd<T> && !StringLike<T> && !CharPtr<T> && !AssociativeLike<T> &&
-            !InitList<T> && requires { typename Decay<T>::value_type; };
+                HasBeginEnd<T> && !StringLike<T> && !CharPtr<T> && !AssociativeLike<T> &&
+                !InitList<T> && requires { typename Decay<T>::value_type; };
 
         // detect C-arrays on original type (to catch T(&)[N])
-        template <class T>
-        concept CArrayLike = std::is_array_v<std::remove_reference_t<T>>;
+        template<class T>
+        concept CArrayLike = std::is_array_v<std::remove_reference_t<T> >;
 
         // ---------- PG array literal helpers ----------
-        inline void pg_array_escape_elem(std::string& out, std::string_view s) {
+        inline void pg_array_escape_elem(std::string &out, std::string_view s) {
             out.push_back('"');
-            for (char ch : s) {
+            for (char ch: s) {
                 if (ch == '"' || ch == '\\') out.push_back('\\');
                 out.push_back(ch);
             }
             out.push_back('"');
         }
 
-        template <class Cnt>
-        inline size_t guess_array_reserve(const Cnt& c) {
+        template<class Cnt>
+        inline size_t guess_array_reserve(const Cnt &c) {
             if constexpr (HasSize<Cnt>)
                 return 2 + c.size() * 8;
             else
@@ -255,29 +269,31 @@ namespace usub::pg {
 
         // -------- enum_meta + enumerate (ureflect) ----------
         namespace upq {
-            // glaze-style helper: enum -> string_view через ureflect::enum_name<E>()
-            template <auto... Es>
+            template<auto... Es>
             consteval auto enumerate() {
                 using E = std::common_type_t<decltype(Es)...>;
                 return std::array<std::pair<E, std::string_view>, sizeof...(Es)>{
-                    {{Es, ::ureflect::enum_name<Es>()}...}};
+                    {{Es, ::ureflect::enum_name<Es>()}...}
+                };
             }
 
-            template <typename E>
+            template<typename E>
             struct enum_meta;
-        }  // namespace upq
+        } // namespace upq
 
-        template <class, class = void>
-        struct has_enum_mapping : std::false_type {};
+        template<class, class = void>
+        struct has_enum_mapping : std::false_type {
+        };
 
-        template <class E>
-        struct has_enum_mapping<E, std::void_t<decltype(upq::enum_meta<E>::mapping)>>
-            : std::true_type {};
+        template<class E>
+        struct has_enum_mapping<E, std::void_t<decltype(upq::enum_meta<E>::mapping)> >
+                : std::true_type {
+        };
 
-        template <class E>
-        inline bool enum_to_token_impl(E v, std::string& out) {
+        template<class E>
+        inline bool enum_to_token_impl(E v, std::string &out) {
             if constexpr (has_enum_mapping<E>::value) {
-                for (auto&& p : upq::enum_meta<E>::mapping) {
+                for (auto &&p: upq::enum_meta<E>::mapping) {
                     if (p.first == v) {
                         out.assign(p.second);
                         return true;
@@ -289,10 +305,10 @@ namespace usub::pg {
             }
         }
 
-        template <class E>
-        inline bool enum_from_token_impl(std::string_view sv, E& out) {
+        template<class E>
+        inline bool enum_from_token_impl(std::string_view sv, E &out) {
             if constexpr (has_enum_mapping<E>::value) {
-                for (auto&& p : upq::enum_meta<E>::mapping) {
+                for (auto &&p: upq::enum_meta<E>::mapping) {
                     if (p.second == sv) {
                         out = p.first;
                         return true;
@@ -302,8 +318,8 @@ namespace usub::pg {
 
             using U = std::underlying_type_t<E>;
             U tmp{};
-            const char* b = sv.data();
-            const char* e = sv.data() + sv.size();
+            const char *b = sv.data();
+            const char *e = sv.data() + sv.size();
             if (auto r = std::from_chars(b, e, tmp); r.ec == std::errc() && r.ptr == e) {
                 out = static_cast<E>(tmp);
                 return true;
@@ -311,8 +327,8 @@ namespace usub::pg {
             return false;
         }
 
-        template <class T>
-        inline void write_array_scalar(std::string& out, const T& v) {
+        template<class T>
+        inline void write_array_scalar(std::string &out, const T &v) {
             if constexpr (Optional<T>) {
                 if (!v) {
                     out += "NULL";
@@ -337,8 +353,8 @@ namespace usub::pg {
                                          std::string_view(v, std::char_traits<char>::length(v)));
                 else
                     out += "NULL";
-            } else if constexpr (std::is_pointer_v<Decay<T>>) {
-                static_assert(!std::is_pointer_v<Decay<T>>,
+            } else if constexpr (std::is_pointer_v<Decay<T> >) {
+                static_assert(!std::is_pointer_v<Decay<T> >,
                               "Unsupported pointer element in array (only char* allowed)");
             } else if constexpr (Streamable<T>) {
                 std::ostringstream oss;
@@ -347,7 +363,7 @@ namespace usub::pg {
             } else if constexpr (EnumType<T>) {
                 std::string tok;
                 if (!enum_to_token_impl(v, tok)) {
-                    using U = std::underlying_type_t<std::decay_t<T>>;
+                    using U = std::underlying_type_t<std::decay_t<T> >;
                     out += std::to_string(static_cast<long long>(static_cast<U>(v)));
                 } else {
                     pg_array_escape_elem(out, tok);
@@ -359,13 +375,13 @@ namespace usub::pg {
             }
         }
 
-        template <class Range>
-        inline std::string build_pg_array_from_range(const Range& r) {
+        template<class Range>
+        inline std::string build_pg_array_from_range(const Range &r) {
             std::string buf;
             buf.reserve(guess_array_reserve(r));
             buf.push_back('{');
             bool first = true;
-            for (auto&& e : r) {
+            for (auto &&e: r) {
                 if (!first) buf.push_back(',');
                 first = false;
                 write_array_scalar(buf, e);
@@ -374,7 +390,7 @@ namespace usub::pg {
             return buf;
         }
 
-        template <class T, size_t N>
+        template<class T, size_t N>
         inline std::string build_pg_array_from_carray(const T (&a)[N]) {
             std::string buf;
             buf.reserve(2 + N * 8);
@@ -387,7 +403,7 @@ namespace usub::pg {
             return buf;
         }
 
-        template <class Elem>
+        template<class Elem>
         consteval Oid pick_array_oid() {
             if constexpr (std::is_same_v<Decay<Elem>, bool>)
                 return BOOLARRAYOID;
@@ -406,31 +422,88 @@ namespace usub::pg {
                 return TEXTARRAYOID;
         }
 
-        template <class T>
+        template<class T>
         struct unopt {
             using type = T;
         };
 
-        template <class U>
-        struct unopt<std::optional<U>> {
+        template<class U>
+        struct unopt<std::optional<U> > {
             using type = U;
         };
 
-        template <class T>
-        using unopt_t = typename unopt<Decay<T>>::type;
-    }  // namespace detail
+        template<class T>
+        using unopt_t = typename unopt<Decay<T> >::type;
+    } // namespace detail
+
+
+    template<class T, bool Strict = true>
+    struct PgJson {
+        using value_type = T;
+        static constexpr bool strict = Strict;
+
+        T value{};
+
+        T *operator->() noexcept { return &value; }
+        const T *operator->() const noexcept { return &value; }
+
+        T &operator*() noexcept { return value; }
+        const T &operator*() const noexcept { return value; }
+
+        operator T &() noexcept { return value; }
+        operator const T &() const noexcept { return value; }
+    };
+
+    template<class T, bool Strict = true, bool Jsonb = true>
+    struct PgJsonParam {
+        const T *ptr{};
+    };
+
+    template<class T, bool Strict = true>
+    [[nodiscard]] inline PgJsonParam<T, Strict, true> pg_jsonb(const T &v) noexcept {
+        return PgJsonParam<T, Strict, true>{&v};
+    }
+
+    template<class T, bool Strict = true>
+    [[nodiscard]] inline PgJsonParam<T, Strict, false> pg_json(const T &v) noexcept {
+        return PgJsonParam<T, Strict, false>{&v};
+    }
+
+    namespace detail {
+        template<class T>
+        struct is_pg_json : std::false_type {
+        };
+
+        template<class T, bool Strict>
+        struct is_pg_json<::usub::pg::PgJson<T, Strict> > : std::true_type {
+        };
+
+        template<class T>
+        inline constexpr bool is_pg_json_v = is_pg_json<std::decay_t<T> >::value;
+
+        template<class T>
+        struct is_pg_json_param : std::false_type {
+        };
+
+        template<class T, bool Strict, bool Jsonb>
+        struct is_pg_json_param<::usub::pg::PgJsonParam<T, Strict, Jsonb> > : std::true_type {
+        };
+
+        template<class T>
+        inline constexpr bool is_pg_json_param_v = is_pg_json_param<std::decay_t<T> >::value;
+    } // namespace detail
 
     struct QueryResult {
         struct Row {
             std::vector<std::string> cols;
 
-            const std::string& operator[](size_t i) const noexcept { return cols[i]; }
+            const std::string &operator[](size_t i) const noexcept { return cols[i]; }
 
-            std::string& operator[](size_t i) noexcept { return cols[i]; }
+            std::string &operator[](size_t i) noexcept { return cols[i]; }
 
-            [[nodiscard]] const std::string& at(size_t i) const { return this->cols.at(i); }
+            [[nodiscard]] const std::string &at(size_t i) const { return this->cols.at(i); }
 
-            [[nodiscard]] std::string& at(size_t i) noexcept { return this->cols.at(i); }
+            [[nodiscard]] std::string &at(size_t i) noexcept { return this->cols.at(i); }
 
             [[nodiscard]] inline size_t size() const noexcept { return this->cols.size(); }
             [[nodiscard]] inline bool empty() const noexcept { return this->cols.empty(); }
@@ -450,8 +523,8 @@ namespace usub::pg {
 
             const_iterator cend() const noexcept { return this->cols.cend(); }
 
-            template <class T>
-            [[nodiscard]] inline std::expected<T, PgOpError> get(const QueryResult& qr,
+            template<class T>
+            [[nodiscard]] inline std::expected<T, PgOpError> get(const QueryResult &qr,
                                                                  std::string_view col_name) const {
                 auto idx = qr.column_index(col_name);
                 if (!idx) {
@@ -474,13 +547,13 @@ namespace usub::pg {
 
         std::vector<Row> rows;
 
-        const Row& operator[](size_t i) const noexcept { return this->rows[i]; }
+        const Row &operator[](size_t i) const noexcept { return this->rows[i]; }
 
-        Row& operator[](size_t i) noexcept { return this->rows[i]; }
+        Row &operator[](size_t i) noexcept { return this->rows[i]; }
 
-        [[nodiscard]] const Row& at(size_t i) const { return this->rows.at(i); }
+        [[nodiscard]] const Row &at(size_t i) const { return this->rows.at(i); }
 
-        [[nodiscard]] Row& at(size_t i) noexcept { return this->rows.at(i); }
+        [[nodiscard]] Row &at(size_t i) noexcept { return this->rows.at(i); }
 
         bool ok{false};
         PgErrorCode code{PgErrorCode::Unknown};
@@ -519,7 +592,7 @@ namespace usub::pg {
             return std::nullopt;
         }
 
-        template <class T>
+        template<class T>
         [[nodiscard]] static inline std::expected<T, PgOpError> parse_cell(std::string_view sv) {
             using D = std::decay_t<T>;
 
@@ -545,9 +618,9 @@ namespace usub::pg {
                 e.error = "failed to parse integer";
                 return std::unexpected(std::move(e));
             } else if constexpr (std::is_floating_point_v<D>) {
-                char* end = nullptr;
+                char *end = nullptr;
                 std::string tmp(sv);
-                const char* s = tmp.c_str();
+                const char *s = tmp.c_str();
                 double v = std::strtod(s, &end);
                 if (end == s + tmp.size()) return static_cast<D>(v);
 
@@ -571,6 +644,29 @@ namespace usub::pg {
                 auto r = parse_cell<V>(sv);
                 if (!r) return std::unexpected(r.error());
                 return D{std::move(*r)};
+            } else if constexpr (::usub::pg::detail::is_pg_json_v<D>) {
+                using Inner = typename D::value_type;
+                constexpr bool Strict = D::strict;
+
+                if (sv == "NULL") {
+                    PgOpError e;
+                    e.code = PgErrorCode::ProtocolCorrupt;
+                    e.error = "PgJson cannot be NULL";
+                    return std::unexpected(std::move(e));
+                }
+
+                auto parsed = ::ujson::try_parse<Inner, Strict>(std::string(sv));
+                if (!parsed) {
+                    PgOpError e;
+                    e.code = PgErrorCode::ProtocolCorrupt;
+                    e.error = std::string("ujson parse failed: ") + (
+                                  parsed.error().msg ? parsed.error().msg : "<null>");
+                    return std::unexpected(std::move(e));
+                }
+
+                D out{};
+                out.value = std::move(*parsed);
+                return out;
             } else {
                 PgOpError e;
                 e.code = PgErrorCode::ProtocolCorrupt;
@@ -579,7 +675,7 @@ namespace usub::pg {
             }
         }
 
-        template <class T>
+        template<class T>
         [[nodiscard]] inline std::expected<T, PgOpError> get(size_t row_i,
                                                              std::string_view col_name) const {
             if (!ok || !rows_valid) {
@@ -605,7 +701,7 @@ namespace usub::pg {
                 return std::unexpected(std::move(e));
             }
 
-            const auto& r = rows[row_i];
+            const auto &r = rows[row_i];
             if (*idx >= r.cols.size()) {
                 PgOpError e;
                 e.code = PgErrorCode::ParserTruncatedField;
@@ -633,7 +729,7 @@ namespace usub::pg {
     };
 
     class QueryState : public utils::sync::refc::RefCounted<QueryState> {
-       public:
+    public:
         std::atomic<bool> ready{false};
         QueryResult result;
 
@@ -647,8 +743,9 @@ namespace usub::pg {
     };
 
     class QueryAwaiter {
-       public:
-        explicit QueryAwaiter(std::shared_ptr<QueryState> st) : state(std::move(st)) {}
+    public:
+        explicit QueryAwaiter(std::shared_ptr<QueryState> st) : state(std::move(st)) {
+        }
 
         bool await_ready() const noexcept {
             return this->state->ready.load(std::memory_order_acquire);
@@ -658,31 +755,32 @@ namespace usub::pg {
 
         QueryResult await_resume() noexcept { return this->state->result; }
 
-       private:
+    private:
         std::shared_ptr<QueryState> state;
     };
 
     class QueryFuture {
-       public:
+    public:
         QueryFuture() = default;
 
-        explicit QueryFuture(std::shared_ptr<QueryState> st) : state(std::move(st)) {}
+        explicit QueryFuture(std::shared_ptr<QueryState> st) : state(std::move(st)) {
+        }
 
         QueryAwaiter operator co_await() const noexcept { return QueryAwaiter(this->state); }
 
         QueryResult wait();
 
-        bool valid() const noexcept { return (bool)this->state; }
+        bool valid() const noexcept { return (bool) this->state; }
 
         std::shared_ptr<QueryState> raw() const noexcept { return this->state; }
 
-       private:
+    private:
         std::shared_ptr<QueryState> state;
     };
 
-    void write_be32(uint8_t* dst, uint32_t v);
+    void write_be32(uint8_t *dst, uint32_t v);
 
-    uint32_t read_be32(const uint8_t* src);
+    uint32_t read_be32(const uint8_t *src);
 
     struct PgFrame {
         char type;
@@ -694,14 +792,14 @@ namespace usub::pg {
         std::string message;
     };
 
-    template <class T>
+    template<class T>
     struct PgWireResult {
         T value{};
         bool ok{false};
         PgWireError err;
     };
 
-    template <>
+    template<>
     struct PgWireResult<void> {
         bool ok{false};
         PgWireError err;
@@ -710,9 +808,9 @@ namespace usub::pg {
     // classify SQLSTATE string ("23505", "40P01", etc.) into PgSqlStateClass
     PgSqlStateClass classify_sqlstate(std::string_view sqlstate);
 
-    template <class Socket>
-    uvent::task::Awaitable<PgWireResult<void>> read_exact(Socket& sock, std::vector<uint8_t>& buf,
-                                                          size_t n) {
+    template<class Socket>
+    uvent::task::Awaitable<PgWireResult<void> > read_exact(Socket &sock, std::vector<uint8_t> &buf,
+                                                           size_t n) {
         PgWireResult<void> out;
         out.ok = false;
         out.err.code = PgErrorCode::Unknown;
@@ -732,23 +830,22 @@ namespace usub::pg {
                 co_return out;
             }
 
-            std::memcpy(buf.data() + off, tmp.data(), (size_t)r);
-            off += (size_t)r;
+            std::memcpy(buf.data() + off, tmp.data(), (size_t) r);
+            off += (size_t) r;
         }
 
         out.ok = true;
         co_return out;
     }
 
-    template <class Socket>
-    uvent::task::Awaitable<PgWireResult<PgFrame>> read_frame(Socket& sock) {
+    template<class Socket>
+    uvent::task::Awaitable<PgWireResult<PgFrame> > read_frame(Socket &sock) {
         PgWireResult<PgFrame> out;
         out.ok = false;
         out.err.code = PgErrorCode::Unknown;
         out.err.message.clear();
 
-        std::vector<uint8_t> header;
-        {
+        std::vector<uint8_t> header; {
             auto hdr_res = co_await read_exact(sock, header, 5);
             if (!hdr_res.ok) {
                 out.err = hdr_res.err;
@@ -756,7 +853,7 @@ namespace usub::pg {
             }
         }
 
-        char type = (char)header[0];
+        char type = (char) header[0];
         uint32_t len = read_be32(&header[1]);
 
         if (len < 4) {
@@ -767,8 +864,7 @@ namespace usub::pg {
 
         uint32_t payload_len = len - 4;
 
-        std::vector<uint8_t> payload;
-        {
+        std::vector<uint8_t> payload; {
             auto pay_res = co_await read_exact(sock, payload, payload_len);
             if (!pay_res.ok) {
                 out.err = pay_res.err;
@@ -790,9 +886,9 @@ namespace usub::pg {
         std::string hint;
     };
 
-    PgServerErrorFields parse_error_fields(const std::vector<uint8_t>& payload);
+    PgServerErrorFields parse_error_fields(const std::vector<uint8_t> &payload);
 
-    std::string parse_error(const std::vector<uint8_t>& payload);
+    std::string parse_error(const std::vector<uint8_t> &payload);
 
     struct RowParseContext {
         bool ok{true};
@@ -800,34 +896,34 @@ namespace usub::pg {
         std::string msg;
     };
 
-    void parse_row_description_ex(const std::vector<uint8_t>& payload,
-                                  std::vector<std::string>& out_cols, RowParseContext& ctx);
+    void parse_row_description_ex(const std::vector<uint8_t> &payload,
+                                  std::vector<std::string> &out_cols, RowParseContext &ctx);
 
-    inline void parse_row_description(const std::vector<uint8_t>& payload,
-                                      std::vector<std::string>& out_cols) {
+    inline void parse_row_description(const std::vector<uint8_t> &payload,
+                                      std::vector<std::string> &out_cols) {
         RowParseContext ctx;
         parse_row_description_ex(payload, out_cols, ctx);
     }
 
-    void parse_data_row_ex(const std::vector<uint8_t>& payload, QueryResult::Row& out_row,
-                           RowParseContext& ctx);
+    void parse_data_row_ex(const std::vector<uint8_t> &payload, QueryResult::Row &out_row,
+                           RowParseContext &ctx);
 
-    inline void parse_data_row(const std::vector<uint8_t>& payload, QueryResult::Row& out_row) {
+    inline void parse_data_row(const std::vector<uint8_t> &payload, QueryResult::Row &out_row) {
         RowParseContext ctx;
         parse_data_row_ex(payload, out_row, ctx);
     }
 
-    std::vector<uint8_t> build_startup_message(const std::string& user, const std::string& db);
+    std::vector<uint8_t> build_startup_message(const std::string &user, const std::string &db);
 
-    std::vector<uint8_t> build_password_message(const std::string& password);
+    std::vector<uint8_t> build_password_message(const std::string &password);
 
-    std::string md5_hex(const uint8_t* data, size_t len);
+    std::string md5_hex(const uint8_t *data, size_t len);
 
-    std::vector<uint8_t> build_md5_password_message(const std::string& user,
-                                                    const std::string& password,
+    std::vector<uint8_t> build_md5_password_message(const std::string &user,
+                                                    const std::string &password,
                                                     const uint8_t salt[4]);
 
-    void build_simple_query(std::vector<uint8_t>& out, std::string_view sql);
+    void build_simple_query(std::vector<uint8_t> &out, std::string_view sql);
 
     struct PgCopyResult {
         bool ok{false};
@@ -845,6 +941,6 @@ namespace usub::pg {
         std::string error;
         PgErrorDetail err_detail;
     };
-}  // namespace usub::pg
+} // namespace usub::pg
 
 #endif

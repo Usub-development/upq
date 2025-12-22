@@ -36,8 +36,14 @@ FetchContent_Declare(
         OVERRIDE_FIND_PACKAGE
 )
 
-FetchContent_MakeAvailable(uvent)
-FetchContent_MakeAvailable(ureflect)
+FetchContent_Declare(
+        ujson
+        GIT_REPOSITORY https://github.com/Usub-development/ujson.git
+        GIT_TAG main
+        OVERRIDE_FIND_PACKAGE
+)
+
+FetchContent_MakeAvailable(uvent ureflect ujson)
 
 file(GLOB_RECURSE UPQ_HEADERS CONFIGURE_DEPENDS
         ${CMAKE_CURRENT_SOURCE_DIR}/include/upq/*.h
@@ -60,6 +66,7 @@ target_link_libraries(upq
         PUBLIC
         usub::uvent
         usub::ureflect
+        usub::ujson
         OpenSSL::Crypto
         PostgreSQL::PostgreSQL
 )
@@ -83,6 +90,10 @@ if (UPQ_BUILD_EXAMPLES)
         add_executable(upq_example_timeout examples/main_timeout.cpp)
         target_link_libraries(upq_example_timeout PRIVATE upq)
         target_compile_definitions(upq_example_timeout PRIVATE DEV_STAGE=${DEV_STAGE})
+
+        add_executable(upq_example_json examples/main_json.cpp)
+        target_link_libraries(upq_example_json PRIVATE upq)
+        target_compile_definitions(upq_example_json PRIVATE DEV_STAGE=${DEV_STAGE})
 endif()
 
 install(TARGETS upq
