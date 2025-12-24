@@ -280,8 +280,8 @@ namespace usub::pg
             return;
 #if UPQ_POOL_DEBUG
         UPQ_POOL_DBG("mark_dead: conn=%p", conn.get());
+#endif
         conn->close();
         this->live_count_.fetch_sub(1, std::memory_order_relaxed);
-#endif
     }
 } // namespace usub::pg
