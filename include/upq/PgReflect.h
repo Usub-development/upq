@@ -1,26 +1,26 @@
 #ifndef PGREFLECT_H
 #define PGREFLECT_H
 
+#include <ujson/ujson.h>
+#include <ureflect/ureflect_auto.h>
+
+#include <algorithm>
+#include <array>
+#include <cctype>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <ios>
+#include <istream>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
-#include <array>
-#include <sstream>
-#include <cstdio>
-#include <ios>
-#include <istream>
-#include <cctype>
-#include <algorithm>
-
-#include <ureflect/ureflect_auto.h>
-#include <ujson/ujson.h>
 
 #include "PgTypes.h"
 
@@ -64,15 +64,17 @@ namespace usub::pg {
         inline std::string normalize_ident(std::string_view in) {
             std::string s;
             s.reserve(in.size());
-            for (char ch: in) {
+            for (char ch : in) {
                 unsigned char c = static_cast<unsigned char>(ch);
-                if (std::isalnum(c)) s.push_back(static_cast<char>(std::tolower(c)));
-                else if (ch == '_') s.push_back('_');
+                if (std::isalnum(c))
+                    s.push_back(static_cast<char>(std::tolower(c)));
+                else if (ch == '_')
+                    s.push_back('_');
             }
             std::string out;
             out.reserve(s.size());
             bool prev_us = false;
-            for (char ch: s) {
+            for (char ch : s) {
                 if (ch == '_') {
                     if (!prev_us) out.push_back('_');
                     prev_us = true;
@@ -84,28 +86,26 @@ namespace usub::pg {
             return out;
         }
 
-        template<class T, class = void>
-        struct is_tuple_like : std::false_type {
-        };
+        template <class T, class = void>
+        struct is_tuple_like : std::false_type {};
 
-        template<class T>
-        struct is_tuple_like<T, std::void_t<decltype(std::tuple_size<std::decay_t<T> >::value)> > : std::true_type {
-        };
+        template <class T>
+        struct is_tuple_like<T, std::void_t<decltype(std::tuple_size<std::decay_t<T>>::value)>>
+            : std::true_type {};
 
-        template<class T>
+        template <class T>
         inline constexpr bool is_tuple_like_v = is_tuple_like<T>::value;
 
-        template<class T>
+        template <class T>
         concept ReflectAggregate =
-                std::is_aggregate_v<std::decay_t<T> > &&
-                (ureflect::count_members<std::decay_t<T> > > 0);
+            std::is_aggregate_v<std::decay_t<T>> && (ureflect::count_members<std::decay_t<T>> > 0);
 
         inline bool fully_consumed(std::istringstream &iss) {
             iss >> std::ws;
             return iss.peek() == std::char_traits<char>::eof();
         }
 
-        template<class Int>
+        template <class Int>
         inline bool parse_int(std::string_view sv, Int &out) noexcept {
             Int tmp{};
             const char *begin = sv.data();
@@ -130,7 +130,7 @@ namespace usub::pg {
             return false;
         }
 
-        template<class Float>
+        template <class Float>
         inline bool parse_float(std::string_view sv, Float &out) noexcept {
             if (sv.empty()) return false;
             Float tmp{};
@@ -190,7 +190,8 @@ namespace usub::pg {
                     if (c == '"' && i + 1 < sv.size() && sv[i + 1] == '"') {
                         out.push_back('"');
                         ++i;
-                    } else out.push_back(c);
+                    } else
+                        out.push_back(c);
                 }
                 return true;
             }
@@ -198,14 +199,63 @@ namespace usub::pg {
             return true;
         }
 
-        template<class T, class = void>
-        struct has_istream_extractor : std::false_type {
-        };
+        inline bool parse_pg_numrange_parts(std::string_view sv, bool &lo_inc, bool &hi_inc,
+                                            std::string_view &lo, std::string_view &hi,
+                                            bool &is_empty) noexcept {
+            is_empty = false;
+            if (sv == "empty") {
+                is_empty = true;
+                return true;
+            }
+            if (sv.size() < 2) return false;
 
-        template<class T>
-        struct has_istream_extractor<T, std::void_t<decltype(std::declval<std::istream &>() >> std::declval<T &>())> >
-                : std::true_type {
-        };
+            const char lb = sv.front();
+            const char rb = sv.back();
+            if (lb == '[')
+                lo_inc = true;
+            else if (lb == '(')
+                lo_inc = false;
+            else
+                return false;
+
+            if (rb == ']')
+                hi_inc = true;
+            else if (rb == ')')
+                hi_inc = false;
+            else
+                return false;
+
+            sv.remove_prefix(1);
+            sv.remove_suffix(1);
+
+            const auto comma = sv.find(',');
+            if (comma == std::string_view::npos) return false;
+
+            lo = sv.substr(0, comma);
+            hi = sv.substr(comma + 1);
+
+            auto trim = [](std::string_view x) {
+                while (!x.empty() && (x.front() == ' ' || x.front() == '\t' || x.front() == '\n' ||
+                                      x.front() == '\r'))
+                    x.remove_prefix(1);
+                while (!x.empty() && (x.back() == ' ' || x.back() == '\t' || x.back() == '\n' ||
+                                      x.back() == '\r'))
+                    x.remove_suffix(1);
+                return x;
+            };
+            lo = trim(lo);
+            hi = trim(hi);
+
+            return true;
+        }
+
+        template <class T, class = void>
+        struct has_istream_extractor : std::false_type {};
+
+        template <class T>
+        struct has_istream_extractor<
+            T, std::void_t<decltype(std::declval<std::istream &>() >> std::declval<T &>())>>
+            : std::true_type {};
 
         inline std::string preview(std::string_view sv, size_t limit = 80) {
             if (sv.size() <= limit) return std::string(sv);
@@ -216,7 +266,7 @@ namespace usub::pg {
             return s;
         }
 
-        template<class T>
+        template <class T>
         inline std::string type_name_short() {
             std::string s{std::string(ureflect::type_name<T>())};
             auto pos = s.rfind("::");
@@ -227,22 +277,23 @@ namespace usub::pg {
 #ifdef UPQ_HAVE_OID_TO_TYPENAME
             return oid_to_typename(oid);
 #else
-            (void) oid;
+            (void)oid;
             return "unknown";
 #endif
         }
 
         inline std::string preview_val(std::string_view sv) { return preview(sv, 80); }
 
-        template<class T>
-        inline std::string expect_type() { return type_name_short<T>(); }
+        template <class T>
+        inline std::string expect_type() {
+            return type_name_short<T>();
+        }
 
-        inline std::string format_mismatch_named(
-            std::string_view field_name,
-            std::string_view field_type,
-            std::string_view col_name,
-            std::string_view col_type,
-            std::string_view val_preview) {
+        inline std::string format_mismatch_named(std::string_view field_name,
+                                                 std::string_view field_type,
+                                                 std::string_view col_name,
+                                                 std::string_view col_type,
+                                                 std::string_view val_preview) {
             std::string out;
             out.reserve(160);
             out += "decode failed: field='";
@@ -261,13 +312,11 @@ namespace usub::pg {
             return out;
         }
 
-        inline std::string format_mismatch_positional(
-            size_t field_index,
-            std::string_view field_type,
-            size_t col_index,
-            std::string_view col_name,
-            std::string_view col_type,
-            std::string_view val_preview) {
+        inline std::string format_mismatch_positional(size_t field_index,
+                                                      std::string_view field_type, size_t col_index,
+                                                      std::string_view col_name,
+                                                      std::string_view col_type,
+                                                      std::string_view val_preview) {
             std::string out;
             out.reserve(200);
             out += "decode failed: field#";
@@ -291,7 +340,7 @@ namespace usub::pg {
             return out;
         }
 
-        template<class T, class Enable = void>
+        template <class T, class Enable = void>
         struct Decoder {
             static bool apply(std::string_view sv, T &out) {
                 if constexpr (std::is_same_v<T, std::string>) {
@@ -316,11 +365,13 @@ namespace usub::pg {
                     return false;
                 } else if constexpr (std::is_enum_v<T>) {
                     return detail::enum_from_token_impl(sv, out);
-                } else { return false; }
+                } else {
+                    return false;
+                }
             }
         };
 
-        template<class T>
+        template <class T>
         struct Decoder<std::optional<T>, void> {
             static bool apply(std::string_view sv, std::optional<T> &out) {
                 if (sv.size() == 0) {
@@ -336,16 +387,14 @@ namespace usub::pg {
             }
         };
 
-        template<class T>
-        struct is_std_vector_reflect : std::false_type {
-        };
+        template <class T>
+        struct is_std_vector_reflect : std::false_type {};
 
-        template<class U, class A>
-        struct is_std_vector_reflect<std::vector<U, A> > : std::true_type {
-        };
+        template <class U, class A>
+        struct is_std_vector_reflect<std::vector<U, A>> : std::true_type {};
 
-        template<class VecT>
-        struct Decoder<VecT, std::enable_if_t<is_std_vector_reflect<VecT>::value> > {
+        template <class VecT>
+        struct Decoder<VecT, std::enable_if_t<is_std_vector_reflect<VecT>::value>> {
             using T = typename VecT::value_type;
 
             static bool apply(std::string_view sv, VecT &out) {
@@ -355,7 +404,7 @@ namespace usub::pg {
                     return false;
 
                 out.reserve(parts.size());
-                for (auto p: parts) {
+                for (auto p : parts) {
                     std::string tok;
                     bool is_null = false;
                     if (!parse_pg_text_elt(p, tok, is_null)) return false;
@@ -391,12 +440,14 @@ namespace usub::pg {
             }
         };
 
-        template<class T>
-        struct Decoder<T, std::enable_if_t<ReflectAggregate<T> && !::usub::pg::detail::is_pg_json_v<T>> > {
+        template <class T>
+        struct Decoder<
+            T, std::enable_if_t<ReflectAggregate<T> && !::usub::pg::detail::is_pg_json_v<T> &&
+                                !::usub::pg::detail::is_pg_numrange_reflect_v<T>>> {
             static bool apply(std::string_view, T &) { return false; }
         };
 
-        template<class T, bool Strict>
+        template <class T, bool Strict>
         struct Decoder<::usub::pg::PgJson<T, Strict>, void> {
             static bool apply(std::string_view sv, ::usub::pg::PgJson<T, Strict> &out) {
                 if (sv.empty()) return false;
@@ -407,31 +458,69 @@ namespace usub::pg {
             }
         };
 
+        template <class T>
+        struct Decoder<::usub::pg::PgNumRange<T>, void> {
+            static bool apply(std::string_view sv, ::usub::pg::PgNumRange<T> &out) {
+                out = {};
+
+                bool lo_inc = true, hi_inc = false, is_empty = false;
+                std::string_view lo_s, hi_s;
+                if (!parse_pg_numrange_parts(sv, lo_inc, hi_inc, lo_s, hi_s, is_empty))
+                    return false;
+
+                out.lo_inclusive = lo_inc;
+                out.hi_inclusive = hi_inc;
+                out.empty = is_empty;
+
+                if (is_empty) {
+                    out.lo.reset();
+                    out.hi.reset();
+                    return true;
+                }
+
+                if (!lo_s.empty()) {
+                    T v{};
+                    if (!Decoder<T>::apply(lo_s, v)) return false;
+                    out.lo = std::move(v);
+                }
+
+                if (!hi_s.empty()) {
+                    T v{};
+                    if (!Decoder<T>::apply(hi_s, v)) return false;
+                    out.hi = std::move(v);
+                }
+
+                return true;
+            }
+        };
+
 #ifdef UPQ_ENABLE_PARAM_ENCODER
         inline void append_escaped(std::string &dst, std::string_view s) {
             dst.push_back('"');
-            for (char c: s) {
-                if (c == '"') dst += "\"\"";
-                else dst.push_back(c);
+            for (char c : s) {
+                if (c == '"')
+                    dst += "\"\"";
+                else
+                    dst.push_back(c);
             }
             dst.push_back('"');
         }
 
-        template<class T, class Enable=void>
+        template <class T, class Enable = void>
         struct ToPg;
 
-        template<class T>
-        struct ToPg<T, std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool>> > {
+        template <class T>
+        struct ToPg<T, std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool>>> {
             static void append(std::string &dst, T v) { dst += std::to_string(v); }
         };
 
-        template<>
+        template <>
         struct ToPg<bool, void> {
             static void append(std::string &dst, bool v) { dst += (v ? "true" : "false"); }
         };
 
-        template<class T>
-        struct ToPg<T, std::enable_if_t<std::is_floating_point_v<T> > > {
+        template <class T>
+        struct ToPg<T, std::enable_if_t<std::is_floating_point_v<T>>> {
             static void append(std::string &dst, T v) {
                 std::ostringstream oss;
                 oss.setf(std::ios::fmtflags(0), std::ios::floatfield);
@@ -441,17 +530,17 @@ namespace usub::pg {
             }
         };
 
-        template<>
+        template <>
         struct ToPg<std::string, void> {
             static void append(std::string &dst, const std::string &v) { append_escaped(dst, v); }
         };
 
-        template<>
+        template <>
         struct ToPg<std::string_view, void> {
             static void append(std::string &dst, std::string_view v) { append_escaped(dst, v); }
         };
 
-        template<class T>
+        template <class T>
         struct ToPg<std::optional<T>, void> {
             static void append(std::string &dst, const std::optional<T> &v) {
                 if (!v) {
@@ -462,15 +551,16 @@ namespace usub::pg {
             }
         };
 
-        template<class Vec>
-        struct ToPg<Vec, std::enable_if_t<is_std_vector<Vec>::value> > {
+        template <class Vec>
+        struct ToPg<Vec, std::enable_if_t<is_std_vector<Vec>::value>> {
             using T = typename Vec::value_type;
 
             static void append(std::string &dst, const Vec &v) {
                 dst.push_back('{');
                 for (size_t i = 0; i < v.size(); ++i) {
                     if (i) dst.push_back(',');
-                    if constexpr (std::is_same_v<T, std::string> || std::is_same_v<T, std::string_view>)
+                    if constexpr (std::is_same_v<T, std::string> ||
+                                  std::is_same_v<T, std::string_view>)
                         append_escaped(dst, std::string_view(v[i]));
                     else
                         ToPg<T>::append(dst, v[i]);
@@ -479,24 +569,26 @@ namespace usub::pg {
             }
         };
 
-        template<class Agg>
+        template <class Agg>
             requires ReflectAggregate<Agg>
         inline void reflect_to_param_strings(const Agg &a, std::vector<std::string> &out) {
             auto tie = ureflect::to_tie(const_cast<Agg &>(a));
             constexpr size_t N = ureflect::count_members<Agg>;
             out.reserve(out.size() + N);
             [&]<size_t... I>(std::index_sequence<I...>) {
-                ( [&] {
-                    using F = std::remove_reference_t<decltype(ureflect::get<I>(tie))>;
-                    std::string s;
-                    s.reserve(32);
-                    ToPg<F>::append(s, ureflect::get<I>(tie));
-                    out.emplace_back(std::move(s));
-                }(), ... );
+                (
+                    [&] {
+                        using F = std::remove_reference_t<decltype(ureflect::get<I>(tie))>;
+                        std::string s;
+                        s.reserve(32);
+                        ToPg<F>::append(s, ureflect::get<I>(tie));
+                        out.emplace_back(std::move(s));
+                    }(),
+                    ...);
             }(std::make_index_sequence<N>{});
         }
-        template<class E>
-        struct ToPg<E, std::enable_if_t<std::is_enum_v<E> > > {
+        template <class E>
+        struct ToPg<E, std::enable_if_t<std::is_enum_v<E>>> {
             static void append(std::string &dst, E v) {
                 std::string tok;
                 if (::usub::pg::detail::enum_to_token_impl(v, tok)) {
@@ -507,7 +599,7 @@ namespace usub::pg {
                 }
             }
         };
-#endif // UPQ_ENABLE_PARAM_ENCODER
+#endif  // UPQ_ENABLE_PARAM_ENCODER
 
         inline int find_col_idx(const std::vector<std::string> &cols, std::string_view norm_name) {
             for (size_t i = 0; i < cols.size(); ++i)
@@ -515,14 +607,12 @@ namespace usub::pg {
             return -1;
         }
 
-        template<class Tuple>
+        template <class Tuple>
             requires is_tuple_like_v<Tuple>
-        inline bool fill_from_row_positional_ex(
-            const QueryResult::Row &row,
-            const std::vector<std::string> *col_names,
-            const std::vector<uint32_t> *col_oids,
-            Tuple &dst,
-            std::string *err) {
+        inline bool fill_from_row_positional_ex(const QueryResult::Row &row,
+                                                const std::vector<std::string> *col_names,
+                                                const std::vector<uint32_t> *col_oids, Tuple &dst,
+                                                std::string *err) {
             using Tup = std::decay_t<Tuple>;
             constexpr std::size_t N = std::tuple_size_v<Tup>;
             if (row.cols.size() < N) {
@@ -534,40 +624,40 @@ namespace usub::pg {
 
             bool ok = true;
             [&]<std::size_t... I>(std::index_sequence<I...>) {
-                ( [&] {
-                    using Elem = std::tuple_element_t<I, Tup>;
-                    const auto &sv = row.cols[I];
-                    Elem tmp{};
+                (
+                    [&] {
+                        using Elem = std::tuple_element_t<I, Tup>;
+                        const auto &sv = row.cols[I];
+                        Elem tmp{};
 
-                    std::string col_type = "unknown";
-                    std::string col_name;
-                    if (col_oids && I < col_oids->size()) col_type = pg_type_name_from_oid((*col_oids)[I]);
-                    if (col_names && I < col_names->size()) col_name = (*col_names)[I];
+                        std::string col_type = "unknown";
+                        std::string col_name;
+                        if (col_oids && I < col_oids->size())
+                            col_type = pg_type_name_from_oid((*col_oids)[I]);
+                        if (col_names && I < col_names->size()) col_name = (*col_names)[I];
 
-                    if (!Decoder<Elem>::apply(std::string_view(sv.data(), sv.size()), tmp)) {
-                        if (err)
-                            *err = format_mismatch_positional(
-                                I, expect_type<Elem>(), I, col_name, col_type,
-                                preview_val(std::string_view(sv.data(), sv.size()))
-                            );
-                        ok = false;
-                    } else {
-                        std::get<I>(dst) = std::move(tmp);
-                    }
-                }(), ... );
+                        if (!Decoder<Elem>::apply(std::string_view(sv.data(), sv.size()), tmp)) {
+                            if (err)
+                                *err = format_mismatch_positional(
+                                    I, expect_type<Elem>(), I, col_name, col_type,
+                                    preview_val(std::string_view(sv.data(), sv.size())));
+                            ok = false;
+                        } else {
+                            std::get<I>(dst) = std::move(tmp);
+                        }
+                    }(),
+                    ...);
             }(std::make_index_sequence<N>{});
             if (!ok && err && err->empty()) *err = "failed to decode tuple element";
             return ok;
         }
 
-        template<class T>
+        template <class T>
             requires ReflectAggregate<T>
-        inline bool fill_from_row_positional_ex(
-            const QueryResult::Row &row,
-            const std::vector<std::string> *col_names,
-            const std::vector<uint32_t> *col_oids,
-            T &dst,
-            std::string *err) {
+        inline bool fill_from_row_positional_ex(const QueryResult::Row &row,
+                                                const std::vector<std::string> *col_names,
+                                                const std::vector<uint32_t> *col_oids, T &dst,
+                                                std::string *err) {
             using V = std::decay_t<T>;
             constexpr std::size_t N = ureflect::count_members<V>;
             if (row.cols.size() < N) {
@@ -580,35 +670,38 @@ namespace usub::pg {
             auto tie = ureflect::to_tie(dst);
             bool ok = true;
             [&]<std::size_t... I>(std::index_sequence<I...>) {
-                ( [&] {
-                    using FieldT = std::remove_reference_t<decltype(ureflect::get<I>(tie))>;
-                    const auto &sv = row.cols[I];
-                    FieldT tmp{};
+                (
+                    [&] {
+                        using FieldT = std::remove_reference_t<decltype(ureflect::get<I>(tie))>;
+                        const auto &sv = row.cols[I];
+                        FieldT tmp{};
 
-                    std::string col_type = "unknown";
-                    std::string col_name;
-                    if (col_oids && I < col_oids->size()) col_type = pg_type_name_from_oid((*col_oids)[I]);
-                    if (col_names && I < col_names->size()) col_name = (*col_names)[I];
+                        std::string col_type = "unknown";
+                        std::string col_name;
+                        if (col_oids && I < col_oids->size())
+                            col_type = pg_type_name_from_oid((*col_oids)[I]);
+                        if (col_names && I < col_names->size()) col_name = (*col_names)[I];
 
-                    if (!Decoder<FieldT>::apply(std::string_view(sv.data(), sv.size()), tmp)) {
-                        if (err)
-                            *err = format_mismatch_positional(
-                                I, expect_type<FieldT>(), I, col_name, col_type,
-                                preview_val(std::string_view(sv.data(), sv.size()))
-                            );
-                        ok = false;
-                    } else {
-                        ureflect::get<I>(tie) = std::move(tmp);
-                    }
-                }(), ... );
+                        if (!Decoder<FieldT>::apply(std::string_view(sv.data(), sv.size()), tmp)) {
+                            if (err)
+                                *err = format_mismatch_positional(
+                                    I, expect_type<FieldT>(), I, col_name, col_type,
+                                    preview_val(std::string_view(sv.data(), sv.size())));
+                            ok = false;
+                        } else {
+                            ureflect::get<I>(tie) = std::move(tmp);
+                        }
+                    }(),
+                    ...);
             }(std::make_index_sequence<N>{});
             if (!ok && err && err->empty()) *err = "failed to decode aggregate field (positional)";
             return ok;
         }
 
-        template<class T>
+        template <class T>
             requires ReflectAggregate<T>
-        inline bool fill_from_row_named(const QueryResult &qr, size_t row_index, T &dst, std::string *err) {
+        inline bool fill_from_row_named(const QueryResult &qr, size_t row_index, T &dst,
+                                        std::string *err) {
             using V = std::decay_t<T>;
             constexpr std::size_t N = ureflect::count_members<V>;
 
@@ -627,16 +720,17 @@ namespace usub::pg {
 
             std::vector<std::string> norm_cols;
             norm_cols.reserve(qr.columns.size());
-            for (auto &c: qr.columns) norm_cols.emplace_back(normalize_ident(c));
+            for (auto &c : qr.columns) norm_cols.emplace_back(normalize_ident(c));
 
 #if UPQ_REFLECT_DEBUG
-            UPQ_LOG("[UPQ/reflect] columns[%zu]: %s", norm_cols.size(), join_csv(qr.columns).c_str());
+            UPQ_LOG("[UPQ/reflect] columns[%zu]: %s", norm_cols.size(),
+                    join_csv(qr.columns).c_str());
 #endif
 
             constexpr auto fnames = ureflect::member_names<V>;
             std::array<std::string, N> norm_fields{};
             [&]<std::size_t... I>(std::index_sequence<I...>) {
-                ( (norm_fields[I] = normalize_ident(fnames[I])), ... );
+                ((norm_fields[I] = normalize_ident(fnames[I])), ...);
             }(std::make_index_sequence<N>{});
 
             int col_map[N];
@@ -645,13 +739,14 @@ namespace usub::pg {
 
             [&]<std::size_t... I>(std::index_sequence<I...>) {
                 (([&] {
-                    const int idx = find_col_idx(norm_cols, norm_fields[I]);
-                    col_map[I] = idx;
-                    if (idx < 0) {
-                        all_found = false;
-                        missing.emplace_back(norm_fields[I]);
-                    }
-                }()), ...);
+                     const int idx = find_col_idx(norm_cols, norm_fields[I]);
+                     col_map[I] = idx;
+                     if (idx < 0) {
+                         all_found = false;
+                         missing.emplace_back(norm_fields[I]);
+                     }
+                 }()),
+                 ...);
             }(std::make_index_sequence<N>{});
 
             if (!all_found) {
@@ -665,56 +760,51 @@ namespace usub::pg {
             auto tie = ureflect::to_tie(dst);
             bool ok = true;
             [&]<std::size_t... I>(std::index_sequence<I...>) {
-                ( [&] {
-                    using FieldT = std::remove_reference_t<decltype(ureflect::get<I>(tie))>;
-                    const int c = col_map[I];
-                    const auto &sv = row.cols[static_cast<size_t>(c)];
-                    FieldT tmp{};
+                (
+                    [&] {
+                        using FieldT = std::remove_reference_t<decltype(ureflect::get<I>(tie))>;
+                        const int c = col_map[I];
+                        const auto &sv = row.cols[static_cast<size_t>(c)];
+                        FieldT tmp{};
 
-                    std::string col_type = "unknown";
+                        std::string col_type = "unknown";
 #ifdef UPQ_RESULT_HAS_COLUMN_OIDS
-                    if (c >= 0 && static_cast<size_t>(c) < qr.column_oids.size())
-                        col_type = pg_type_name_from_oid(qr.column_oids[static_cast<size_t>(c)]);
+                        if (c >= 0 && static_cast<size_t>(c) < qr.column_oids.size())
+                            col_type =
+                                pg_type_name_from_oid(qr.column_oids[static_cast<size_t>(c)]);
 #endif
 
-                    if (!Decoder<FieldT>::apply(std::string_view(sv.data(), sv.size()), tmp)) {
-                        if (err) {
-                            *err = format_mismatch_named(
-                                fnames[I],
-                                expect_type<FieldT>(),
-                                qr.columns[static_cast<size_t>(c)],
-                                col_type,
-                                preview_val(std::string_view(sv.data(), sv.size()))
-                            );
+                        if (!Decoder<FieldT>::apply(std::string_view(sv.data(), sv.size()), tmp)) {
+                            if (err) {
+                                *err = format_mismatch_named(
+                                    fnames[I], expect_type<FieldT>(),
+                                    qr.columns[static_cast<size_t>(c)], col_type,
+                                    preview_val(std::string_view(sv.data(), sv.size())));
+                            }
+                            ok = false;
+                        } else {
+                            ureflect::get<I>(tie) = std::move(tmp);
                         }
-                        ok = false;
-                    } else {
-                        ureflect::get<I>(tie) = std::move(tmp);
-                    }
-                }(), ... );
+                    }(),
+                    ...);
             }(std::make_index_sequence<N>{});
 
             if (!ok && err && err->empty()) *err = "failed to decode aggregate field (named)";
             return ok;
         }
-    } // namespace detail
+    }  // namespace detail
 
-    template<class T>
-    inline bool map_row_reflect_positional(
-        const QueryResult::Row &row,
-        T &out,
-        std::string *err = nullptr) {
+    template <class T>
+    inline bool map_row_reflect_positional(const QueryResult::Row &row, T &out,
+                                           std::string *err = nullptr) {
         std::string local;
         std::string *perr = err ? err : &local;
         return detail::fill_from_row_positional_ex(row, nullptr, nullptr, out, perr);
     }
 
-    template<class T>
-    inline bool map_row_reflect_positional_ex(
-        const QueryResult &qr,
-        size_t row_index,
-        T &out,
-        std::string *err = nullptr) {
+    template <class T>
+    inline bool map_row_reflect_positional_ex(const QueryResult &qr, size_t row_index, T &out,
+                                              std::string *err = nullptr) {
         if (row_index >= qr.rows.size()) {
             if (err) *err = "row out of range";
             return false;
@@ -731,8 +821,9 @@ namespace usub::pg {
         return detail::fill_from_row_positional_ex(row, names, oids, out, perr);
     }
 
-    template<class T>
-    inline T map_single_reflect_positional(const QueryResult &qr, size_t row = 0, std::string *err = nullptr) {
+    template <class T>
+    inline T map_single_reflect_positional(const QueryResult &qr, size_t row = 0,
+                                           std::string *err = nullptr) {
         std::string local;
         std::string *perr = err ? err : &local;
         T dst{};
@@ -741,8 +832,9 @@ namespace usub::pg {
         return dst;
     }
 
-    template<class T>
-    inline std::vector<T> map_all_reflect_positional(const QueryResult &qr, std::string *err = nullptr) {
+    template <class T>
+    inline std::vector<T> map_all_reflect_positional(const QueryResult &qr,
+                                                     std::string *err = nullptr) {
         std::string local;
         std::string *perr = err ? err : &local;
         std::vector<T> out;
@@ -759,17 +851,19 @@ namespace usub::pg {
         return out;
     }
 
-    template<class T>
+    template <class T>
         requires detail::ReflectAggregate<T>
-    inline bool map_row_reflect_named(const QueryResult &qr, size_t row_index, T &out, std::string *err = nullptr) {
+    inline bool map_row_reflect_named(const QueryResult &qr, size_t row_index, T &out,
+                                      std::string *err = nullptr) {
         std::string local;
         std::string *perr = err ? err : &local;
         return detail::fill_from_row_named(qr, row_index, out, perr);
     }
 
-    template<class T>
+    template <class T>
         requires detail::ReflectAggregate<T>
-    inline T map_single_reflect_named(const QueryResult &qr, size_t row = 0, std::string *err = nullptr) {
+    inline T map_single_reflect_named(const QueryResult &qr, size_t row = 0,
+                                      std::string *err = nullptr) {
         std::string local;
         std::string *perr = err ? err : &local;
         T dst{};
@@ -778,7 +872,7 @@ namespace usub::pg {
         return dst;
     }
 
-    template<class T>
+    template <class T>
         requires detail::ReflectAggregate<T>
     inline std::vector<T> map_all_reflect_named(const QueryResult &qr, std::string *err = nullptr) {
         std::string local;
@@ -796,6 +890,6 @@ namespace usub::pg {
         }
         return out;
     }
-} // namespace usub::pg
+}  // namespace usub::pg
 
-#endif // PGREFLECT_H
+#endif  // PGREFLECT_H
