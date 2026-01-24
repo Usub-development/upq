@@ -1,0 +1,10 @@
+//
+// Created by kirill on 1/11/26.
+//
+
+#ifndef UPQ_SOURCE_DIR_H_IN_H
+#define UPQ_SOURCE_DIR_H_IN_H
+
+#define SOURCE_DIR "@CMAKE_CURRENT_SOURCE_DIR@"
+
+#endif //UPQ_SOURCE_DIR_H_IN_H

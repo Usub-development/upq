@@ -90,6 +90,35 @@ if (UPQ_BUILD_EXAMPLES)
         add_executable(upq_example_timeout examples/main_timeout.cpp)
         target_link_libraries(upq_example_timeout PRIVATE upq)
         target_compile_definitions(upq_example_timeout PRIVATE DEV_STAGE=${DEV_STAGE})
+
+        FetchContent_Declare(
+                ulog
+                GIT_REPOSITORY https://github.com/Usub-development/ulog.git
+                GIT_TAG main
+                OVERRIDE_FIND_PACKAGE
+        )
+        FetchContent_Declare(
+                unet
+                GIT_REPOSITORY https://github.com/Usub-development/unet.git
+                GIT_TAG main
+                OVERRIDE_FIND_PACKAGE
+        )
+        FetchContent_MakeAvailable(unet ulog)
+
+        configure_file(
+                ${CMAKE_CURRENT_SOURCE_DIR}/examples/db_timeout/source_dir.h.in
+                ${CMAKE_CURRENT_BINARY_DIR}/examples/db_timeout/source_dir.h
+                @ONLY
+        )
+
+        add_executable(upq_example_db_timeout
+                examples/db_timeout/main_db_timeout.cpp
+        )
+        target_include_directories(upq_example_db_timeout PRIVATE
+                ${CMAKE_CURRENT_BINARY_DIR}/examples/db_timeout
+        )
+        target_link_libraries(upq_example_db_timeout PRIVATE upq usub::server usub::ulog)
+        target_compile_definitions(upq_example_db_timeout PRIVATE DEV_STAGE=${DEV_STAGE})
 endif()
 
 install(TARGETS upq

@@ -1,0 +1,8 @@
+[server]
+threads = 4
+ip_addr = "0.0.0.0"
+timeout = 5000
+
+[[listener]]
+port = 7002
+ssl = false
