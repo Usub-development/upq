@@ -584,6 +584,42 @@ namespace usub::pg {
         }
     } // namespace detail
 
+    enum class SSLMode {
+        disable,
+        allow,
+        prefer,
+        require,
+        verify_ca,
+        verify_full
+    };
+
+    static inline std::string to_string(SSLMode m) {
+        switch (m) {
+            case SSLMode::disable:     return "disable";
+            case SSLMode::allow:       return "allow";
+            case SSLMode::prefer:      return "prefer";
+            case SSLMode::require:     return "require";
+            case SSLMode::verify_ca:   return "verify-ca";
+            case SSLMode::verify_full: return "verify-full";
+        }
+        return "prefer";
+    }
+
+    struct SSLConfig {
+        SSLMode mode{SSLMode::prefer};
+
+        // For verify-ca / verify-full
+        std::optional<std::string> root_cert; // CA bundle (path or PEM)
+        std::optional<std::string> crl; // optional
+
+        // For mTLS (client auth)
+        std::optional<std::string> client_cert; // path or PEM
+        std::optional<std::string> client_key; // path or PEM
+
+        // For verify-full when connecting by IP but validating DNS name
+        std::optional<std::string> server_hostname;
+    };
+
     class PgConnectionLibpq {
     public:
         template<class HandlerT>

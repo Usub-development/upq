@@ -8,6 +8,7 @@
 #include <chrono>
 #include <optional>
 #include <cstdint>
+#include <mutex>
 #include "PgTransaction.h"
 #include "upq/PgPool.h"
 
@@ -91,6 +92,7 @@ namespace usub::pg
         TimeoutsMs timeouts{};
         HealthCfg health{};
         uint32_t connect_retries{20};
+        SSLConfig ssl_config{};
     };
 
     struct Row
@@ -129,6 +131,7 @@ namespace usub::pg
         Config cfg_;
         std::vector<Node> nodes_;
         std::vector<size_t> primary_failover_idx_;
+        mutable std::mutex mu_;
 
         Node* pick_primary();
         Node* pick_best_replica(const RouteHint& hint);

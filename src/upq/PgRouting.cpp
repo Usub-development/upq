@@ -34,7 +34,7 @@ namespace usub::pg
                 pool = std::make_unique<PgPool>(
                     ep.host, ep.port, ep.user, ep.db, ep.password,
                     ep.max_pool ? ep.max_pool : pool_cap_for(ep.role, this->cfg_.limits),
-                    this->cfg_.connect_retries
+                    this->cfg_.connect_retries, this->cfg_.ssl_config
                 );
             }
             catch (...)
@@ -82,6 +82,7 @@ namespace usub::pg
 
     PgPool* PgConnector::route(const RouteHint& hint)
     {
+        std::scoped_lock lk(mu_);
         if (hint.kind == QueryKind::Write ||
             hint.kind == QueryKind::DDL ||
             hint.consistency == Consistency::Strong ||
@@ -114,6 +115,7 @@ namespace usub::pg
 
     PgPool* PgConnector::route_for_tx(const PgTransactionConfig& cfg_tx)
     {
+        std::scoped_lock lk(mu_);
         const auto eff_consistency =
             (cfg_tx.isolation == TxIsolationLevel::Serializable)
                 ? Consistency::Strong
@@ -303,6 +305,7 @@ namespace usub::pg
 
     usub::uvent::task::Awaitable<void> PgConnector::health_tick()
     {
+        std::scoped_lock lk(mu_);
         const auto lag_thr = std::chrono::milliseconds{this->cfg_.health.lag_threshold_ms};
         for (auto& n : this->nodes_)
         {
@@ -339,6 +342,7 @@ namespace usub::pg
 
     PgPool* PgConnector::pin(const std::string& node_name, const RouteHint&)
     {
+        std::scoped_lock lk(mu_);
         auto it = std::find_if(this->nodes_.begin(), this->nodes_.end(),
                                [&](const Node& n) { return n.ep.name == node_name; });
         if (it == this->nodes_.end() || !this->is_usable(it->ep.role) || it->cb_state == 2) return nullptr;

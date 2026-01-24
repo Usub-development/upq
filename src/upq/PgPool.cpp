@@ -1,16 +1,16 @@
 #include "upq/PgPool.h"
 
 #include <cstdlib>
+#include <utility>
 
-namespace usub::pg
-{
+namespace usub::pg {
     PgPool::PgPool(std::string host,
                    std::string port,
                    std::string user,
                    std::string db,
                    std::string password,
                    size_t max_pool_size,
-                   int retries_on_connection_failed)
+                   int retries_on_connection_failed, SSLConfig ssl_config)
         : host_(std::move(host))
           , port_(std::move(port))
           , user_(std::move(user))
@@ -21,8 +21,7 @@ namespace usub::pg
           , live_count_(0)
           , stats_{}
           , retries_on_connection_failed_(retries_on_connection_failed)
-          , idle_sem_(0)
-    {
+          , idle_sem_(0), ssl_config_(std::move(ssl_config)) {
 #if UPQ_POOL_DEBUG
         UPQ_POOL_DBG("ctor: host=%s port=%s user=%s db=%s max_pool=%zu retries=%d",
                      host_.c_str(), port_.c_str(), user_.c_str(), db_.c_str(),
@@ -32,29 +31,24 @@ namespace usub::pg
 
     PgPool::~PgPool() = default;
 
-    usub::uvent::task::Awaitable<std::expected<std::shared_ptr<PgConnectionLibpq>, PgOpError>>
-    PgPool::acquire_connection()
-    {
+    usub::uvent::task::Awaitable<std::expected<std::shared_ptr<PgConnectionLibpq>, PgOpError> >
+    PgPool::acquire_connection() {
         using namespace std::chrono_literals;
 
         std::shared_ptr<PgConnectionLibpq> conn;
 
-        for (;;)
-        {
-            if (this->idle_.try_dequeue(conn))
-            {
+        for (;;) {
+            if (this->idle_.try_dequeue(conn)) {
                 stats_.checked.fetch_add(1, std::memory_order_relaxed);
 
-                if (!conn)
-                {
+                if (!conn) {
 #if UPQ_POOL_DEBUG
                     UPQ_POOL_DBG("acquire: got null conn from idle queue, dropping");
 #endif
                     continue;
                 }
 
-                if (!conn->connected())
-                {
+                if (!conn->connected()) {
 #if UPQ_POOL_DEBUG
                     UPQ_POOL_DBG("acquire: got bad idle conn=%p (disconnected), dropping",
                                  conn.get());
@@ -63,21 +57,18 @@ namespace usub::pg
                     continue;
                 }
 
-                if (!conn->is_idle())
-                {
+                if (!conn->is_idle()) {
 #if UPQ_POOL_DEBUG
                     UPQ_POOL_DBG("acquire: got non-idle from idle queue conn=%p, trying to drain",
                                  conn.get());
 #endif
 
                     bool pumped = co_await conn->pump_input();
-                    if (pumped)
-                    {
-                        (void)conn->drain_all_results();
+                    if (pumped) {
+                        (void) conn->drain_all_results();
                     }
 
-                    if (!conn->connected())
-                    {
+                    if (!conn->connected()) {
 #if UPQ_POOL_DEBUG
                         UPQ_POOL_DBG("acquire: conn=%p disconnected after drain, dropping",
                                      conn.get());
@@ -86,8 +77,7 @@ namespace usub::pg
                         continue;
                     }
 
-                    if (!conn->is_idle())
-                    {
+                    if (!conn->is_idle()) {
 #if UPQ_POOL_DEBUG
                         UPQ_POOL_DBG("acquire: conn=%p still non-idle after drain, dropping",
                                      conn.get());
@@ -111,14 +101,12 @@ namespace usub::pg
             }
 
             size_t cur_live = this->live_count_.load(std::memory_order_relaxed);
-            if (cur_live < this->max_pool_)
-            {
+            if (cur_live < this->max_pool_) {
                 if (this->live_count_.compare_exchange_strong(
                     cur_live,
                     cur_live + 1,
                     std::memory_order_acq_rel,
-                    std::memory_order_relaxed))
-                {
+                    std::memory_order_relaxed)) {
 #if UPQ_POOL_DEBUG
                     UPQ_POOL_DBG("acquire: creating new conn (live=%zu -> %zu)",
                                  cur_live, cur_live + 1);
@@ -126,22 +114,17 @@ namespace usub::pg
 
                     auto newConn = std::make_shared<PgConnectionLibpq>();
 
-                    std::string conninfo =
-                        "host=" + this->host_ +
-                        " port=" + this->port_ +
-                        " user=" + this->user_ +
-                        " dbname=" + this->db_ +
-                        " password=" + this->password_ +
-                        " sslmode=disable";
+                    auto conninfo = make_conninfo(host_, port_, user_, db_, password_, ssl_config_);
+                    if (!conninfo) co_return std::unexpected(PgOpError{
+                        PgErrorCode::ProtocolCorrupt, "conninfo contains NUL", {}
+                    });
 
                     bool connected = false;
                     std::optional<std::string> last_err;
 
-                    for (int attempt = 0; attempt < retries_on_connection_failed_; ++attempt)
-                    {
-                        auto err = co_await newConn->connect_async(conninfo);
-                        if (!err.has_value())
-                        {
+                    for (int attempt = 0; attempt < retries_on_connection_failed_; ++attempt) {
+                        auto err = co_await newConn->connect_async(conninfo.value());
+                        if (!err.has_value()) {
                             connected = true;
                             break;
                         }
@@ -159,14 +142,12 @@ namespace usub::pg
                             co_await uvent::system::this_coroutine::sleep_for(100ms);
                     }
 
-                    if (!connected)
-                    {
+                    if (!connected) {
                         stats_.reconnected.fetch_add(1, std::memory_order_relaxed);
                         mark_dead(newConn);
 
                         std::string msg = "Connection failed after retries";
-                        if (last_err)
-                        {
+                        if (last_err) {
                             msg += ": ";
                             msg += *last_err;
                         }
@@ -193,13 +174,11 @@ namespace usub::pg
         }
     }
 
-    void PgPool::release_connection(std::shared_ptr<PgConnectionLibpq> conn)
-    {
+    void PgPool::release_connection(std::shared_ptr<PgConnectionLibpq> conn) {
         if (!conn)
             return;
 
-        if (!conn->connected() || !conn->is_idle())
-        {
+        if (!conn->connected() || !conn->is_idle()) {
 #if UPQ_POOL_DEBUG
             UPQ_POOL_DBG("release: conn=%p not idle or disconnected, mark_dead", conn.get());
 #endif
@@ -207,15 +186,12 @@ namespace usub::pg
             return;
         }
 
-        if (!this->idle_.try_enqueue(conn))
-        {
+        if (!this->idle_.try_enqueue(conn)) {
 #if UPQ_POOL_DEBUG
             UPQ_POOL_DBG("release: idle queue full for conn=%p, mark_dead", conn.get());
 #endif
             mark_dead(conn);
-        }
-        else
-        {
+        } else {
 #if UPQ_POOL_DEBUG
             UPQ_POOL_DBG("release: enqueued conn=%p", conn.get());
 #endif
@@ -224,15 +200,12 @@ namespace usub::pg
     }
 
     usub::uvent::task::Awaitable<void>
-    PgPool::release_connection_async(std::shared_ptr<PgConnectionLibpq> conn)
-    {
-        if (!conn)
-        {
+    PgPool::release_connection_async(std::shared_ptr<PgConnectionLibpq> conn) {
+        if (!conn) {
             co_return;
         }
 
-        if (!conn->connected())
-        {
+        if (!conn->connected()) {
 #if UPQ_POOL_DEBUG
             UPQ_POOL_DBG("release_async: conn=%p disconnected, mark_dead", conn.get());
 #endif
@@ -241,13 +214,11 @@ namespace usub::pg
         }
 
         bool pumped = co_await conn->pump_input();
-        if (pumped)
-        {
-            (void)conn->drain_all_results();
+        if (pumped) {
+            (void) conn->drain_all_results();
         }
 
-        if (!conn->connected() || !conn->is_idle())
-        {
+        if (!conn->connected() || !conn->is_idle()) {
 #if UPQ_POOL_DEBUG
             UPQ_POOL_DBG("release_async: conn=%p not idle or disconnected after drain, mark_dead",
                          conn.get());
@@ -256,15 +227,12 @@ namespace usub::pg
             co_return;
         }
 
-        if (!this->idle_.try_enqueue(conn))
-        {
+        if (!this->idle_.try_enqueue(conn)) {
 #if UPQ_POOL_DEBUG
             UPQ_POOL_DBG("release_async: idle queue full for conn=%p, mark_dead", conn.get());
 #endif
             mark_dead(conn);
-        }
-        else
-        {
+        } else {
 #if UPQ_POOL_DEBUG
             UPQ_POOL_DBG("release_async: enqueued conn=%p", conn.get());
 #endif
@@ -274,8 +242,7 @@ namespace usub::pg
         co_return;
     }
 
-    void PgPool::mark_dead(std::shared_ptr<PgConnectionLibpq> const& conn)
-    {
+    void PgPool::mark_dead(std::shared_ptr<PgConnectionLibpq> const &conn) {
         if (!conn)
             return;
 #if UPQ_POOL_DEBUG

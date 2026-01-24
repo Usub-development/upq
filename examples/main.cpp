@@ -104,10 +104,13 @@ task::Awaitable<void> test_db_query(usub::pg::PgPool &pool) { {
     } {
         usub::pg::PgTransaction txn(&pool);
 
-        bool ok_begin = co_await txn.begin();
-        if (!ok_begin) {
-            std::cout << "[ERROR] txn.begin() failed" << std::endl;
+        if (auto err_begin = co_await txn.begin_errored(); err_begin) {
             co_await txn.finish();
+            const auto &e = err_begin.value();
+
+            std::cout << "[TX] begin failed" << toString(e.code) << ", " << e.error << ", " << e.err_detail.sqlstate <<
+                    ", "
+                    << e.err_detail.message;
             co_return;
         } {
             auto r_upd = co_await txn.query(
@@ -217,15 +220,23 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool &pool) {
             }
             std::cout << "[OK] inserted rows (tuple): " << r2.rows_affected << "\n";
         } {
-            auto rows = co_await pool.query_reflect<UserRow>(
+            auto rows = co_await pool.query_reflect_expected<UserRow>(
                 "SELECT id, password, name AS username, roles, tags FROM users_reflect ORDER BY id;"
             );
+            if (!rows.has_value()) {
+                auto &error = rows.error();
+                std::cout << "PgQuery failed: " << toString(error.code) << ", " << error.err_detail.sqlstate << ", " <<
+                        error.err_detail.message << "\n";
+                co_return;
+            }
 
-            if (rows.empty()) {
+            auto rows_unwrapped = rows.value();
+
+            if (rows_unwrapped.empty()) {
                 std::cout << "[INFO] no rows\n";
             } else {
-                std::cout << "[INFO] read " << rows.size() << " rows\n";
-                for (auto &r: rows) {
+                std::cout << "[INFO] read " << rows_unwrapped.size() << " rows\n";
+                for (auto &r: rows_unwrapped) {
                     std::cout << "  id=" << r.id
                             << " name=" << r.username
                             << " password=" << (r.password ? *r.password : "<NULL>")
@@ -243,15 +254,16 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool &pool) {
                 }
             }
         } {
-            auto one = co_await pool.query_reflect_one<UserRow>(
+            auto one = co_await pool.query_reflect_expected_one<UserRow>(
                 "SELECT id, name AS username, password, roles, tags "
                 "FROM users_reflect WHERE name='Alice' LIMIT 1;"
             );
+
             if (one) std::cout << "[ONE] id=" << one->id << " name=" << one->username << "\n";
             else std::cout << "[ONE] not found\n";
         } {
             int64_t qid = 1;
-            auto one = co_await pool.query_reflect_one<UserRow>(
+            auto one = co_await pool.query_reflect_expected_one<UserRow>(
                 "SELECT id, name AS username, password, roles, tags "
                 "FROM users_reflect WHERE id = $1",
                 qid
@@ -259,7 +271,7 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool &pool) {
             std::cout << "[BY-ID] " << (one ? one->username : "<none>") << "\n";
         } {
             std::string q_name = "Alice";
-            auto one = co_await pool.query_reflect_one<UserRow>(
+            auto one = co_await pool.query_reflect_expected_one<UserRow>(
                 "SELECT id, name AS username, password, roles, tags "
                 "FROM users_reflect WHERE name = $1",
                 q_name
@@ -267,58 +279,107 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool &pool) {
             std::cout << "[BY-NAME] " << (one ? one->username : "<none>") << "\n";
         } {
             std::vector<std::string> need_tags{"admin", "labs"};
-            auto rows = co_await pool.query_reflect<UserRow>(
+            auto rows = co_await pool.query_reflect_expected<UserRow>(
                 "SELECT id, name AS username, password, roles, tags "
                 "FROM users_reflect "
                 "WHERE tags && $1::text[] "
                 "ORDER BY id",
                 need_tags
             );
-            std::cout << "[TAGS-OVERLAP] n=" << rows.size() << "\n";
+
+            if (!rows.has_value()) {
+                auto &error = rows.error();
+                std::cout << "PgQuery failed: " << toString(error.code) << ", " << error.err_detail.sqlstate << ", " <<
+                        error.err_detail.message << "\n";
+                co_return;
+            }
+
+            auto rows_unwrapped = rows.value();
+            std::cout << "[TAGS-OVERLAP] n=" << rows_unwrapped.size() << "\n";
         } {
             std::array<int, 3> role_set{1, 2, 5};
-            auto rows = co_await pool.query_reflect<UserRow>(
+            auto rows = co_await pool.query_reflect_expected<UserRow>(
                 "SELECT id, name AS username, password, roles, tags "
                 "FROM users_reflect "
                 "WHERE roles && $1::int4[] "
                 "ORDER BY id",
                 role_set
             );
-            std::cout << "[ROLES-OVERLAP] n=" << rows.size() << "\n";
+
+            if (!rows.has_value()) {
+                auto &error = rows.error();
+                std::cout << "PgQuery failed: " << toString(error.code) << ", " << error.err_detail.sqlstate << ", " <<
+                        error.err_detail.message << "\n";
+                co_return;
+            }
+
+            auto rows_unwrapped = rows.value();
+
+            std::cout << "[ROLES-OVERLAP] n=" << rows_unwrapped.size() << "\n";
         } {
             std::optional<std::string> pass = std::nullopt;
-            auto rows = co_await pool.query_reflect<UserRow>(
+            auto rows = co_await pool.query_reflect_expected<UserRow>(
                 "SELECT id, name AS username, password, roles, tags "
                 "FROM users_reflect "
                 "WHERE password IS NOT DISTINCT FROM $1 "
                 "ORDER BY id",
                 pass
             );
-            std::cout << "[PWD=NULL] n=" << rows.size() << "\n";
+
+            if (!rows.has_value()) {
+                auto &error = rows.error();
+                std::cout << "PgQuery failed: " << toString(error.code) << ", " << error.err_detail.sqlstate << ", " <<
+                        error.err_detail.message << "\n";
+                co_return;
+            }
+
+            auto rows_unwrapped = rows.value();
+
+            std::cout << "[PWD=NULL] n=" << rows_unwrapped.size() << "\n";
         } {
             std::vector<int64_t> ids{1, 2, 3, 4};
-            auto rows = co_await pool.query_reflect<UserRow>(
+            auto rows = co_await pool.query_reflect_expected<UserRow>(
                 "SELECT id, name AS username, password, roles, tags "
                 "FROM users_reflect "
                 "WHERE id = ANY($1::int8[]) "
                 "ORDER BY id",
                 ids
             );
-            std::cout << "[ANY(ids)] n=" << rows.size() << "\n";
+
+            if (!rows.has_value()) {
+                auto &error = rows.error();
+                std::cout << "PgQuery failed: " << toString(error.code) << ", " << error.err_detail.sqlstate << ", " <<
+                        error.err_detail.message << "\n";
+                co_return;
+            }
+
+            auto rows_unwrapped = rows.value();
+
+            std::cout << "[ANY(ids)] n=" << rows_unwrapped.size() << "\n";
         } {
             int limit = 2, offset = 0;
-            auto page = co_await pool.query_reflect<UserRow>(
+            auto page = co_await pool.query_reflect_expected<UserRow>(
                 "SELECT id, name AS username, password, roles, tags "
                 "FROM users_reflect "
                 "ORDER BY id LIMIT $1 OFFSET $2",
                 limit, offset
             );
-            std::cout << "[PAGE] n=" << page.size()
+
+            if (!page.has_value()) {
+                auto &error = page.error();
+                std::cout << "PgQuery failed: " << toString(error.code) << ", " << error.err_detail.sqlstate << ", " <<
+                        error.err_detail.message << "\n";
+                co_return;
+            }
+
+            auto page_unwrapped = page.value();
+
+            std::cout << "[PAGE] n=" << page_unwrapped.size()
                     << " (limit=" << limit << ", off=" << offset << ")\n";
         } {
             Upd u{.name = "Alice-upd", .id = 1};
 
-            auto ret = co_await pool.query_reflect_one<Ret>(
+            auto ret = co_await pool.query_reflect_expected_one<Ret>(
                 "WITH upd AS ("
                 "  UPDATE users_reflect SET name = $1 WHERE id = $2 "
                 "  RETURNING id, name"
@@ -327,8 +388,8 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool &pool) {
                 u
             );
 
-            if (!ret) {
-                auto check = co_await pool.query_reflect_one<Ret>(
+            if (ret) {
+                auto check = co_await pool.query_reflect_expected_one<Ret>(
                     "SELECT id, name AS username FROM users_reflect WHERE id = $1",
                     u.id
                 );
@@ -339,7 +400,7 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool &pool) {
         } {
             std::optional<std::string> patt = std::string("%ali%");
             std::optional<int64_t> min_id = int64_t{0};
-            auto rows = co_await pool.query_reflect<UserRow>(
+            auto rows = co_await pool.query_reflect_expected<UserRow>(
                 "SELECT id, name AS username, password, roles, tags "
                 "FROM users_reflect "
                 "WHERE ($1::text IS NULL OR name ILIKE $1) "
@@ -347,7 +408,16 @@ task::Awaitable<void> test_reflect_query(usub::pg::PgPool &pool) {
                 "ORDER BY id",
                 patt, min_id
             );
-            std::cout << "[MIXED] n=" << rows.size() << "\n";
+            if (!rows.has_value()) {
+                auto &error = rows.error();
+                std::cout << "PgQuery failed: " << toString(error.code) << ", " << error.err_detail.sqlstate << ", " <<
+                        error.err_detail.message << "\n";
+                co_return;
+            }
+
+            auto rows_unwrapped = rows.value();
+
+            std::cout << "[MIXED] n=" << rows_unwrapped.size() << "\n";
         }
     } catch (std::exception &e) {
         std::cout << "[EXCEPTION] exception: " << e.what() << "\n";
@@ -373,8 +443,12 @@ usub::uvent::task::Awaitable<void> tx_reflect_example(usub::pg::PgPool &pool) { 
     }
 
     usub::pg::PgTransaction tx(&pool);
-    if (!(co_await tx.begin())) {
-        std::cout << "[TX] begin failed\n";
+    if (auto err_begin = co_await tx.begin_errored(); err_begin) {
+        co_await tx.finish();
+        const auto &e = err_begin.value();
+
+        std::cout << "[TX] begin failed" << toString(e.code) << ", " << e.error << ", " << e.err_detail.sqlstate << ", "
+                << e.err_detail.message;
         co_return;
     } {
         const char *timeout = "2s";
@@ -942,9 +1016,19 @@ usub::uvent::task::Awaitable<void> decode_fail_example(usub::pg::PgPool &pool) {
     }
 
     try {
-        auto rows = co_await pool.query_reflect<UserErrorRow>(
+        auto rows = co_await pool.query_reflect_expected<UserErrorRow>(
             "SELECT id, name, balance FROM users_r");
-        std::cout << "[ROWS] n=" << rows.size() << "\n";
+
+        if (!rows.has_value()) {
+            auto &error = rows.error();
+            std::cout << "PgQuery failed: " << toString(error.code) << ", " << error.err_detail.sqlstate << ", " <<
+                    error.err_detail.message << "\n";
+            co_return;
+        }
+
+        auto rows_unwrapped = rows.value();
+
+        std::cout << "[ROWS] n=" << rows_unwrapped.size() << "\n";
     } catch (const std::exception &ex) {
         std::cerr << "!!! Decode error caught: " << ex.what() << "\n";
     }
@@ -1024,8 +1108,13 @@ usub::uvent::task::Awaitable<void> expected_reflect_example(usub::pg::PgPool &po
         }
     } {
         usub::pg::PgTransaction tx(&pool);
-        if (!(co_await tx.begin())) {
-            std::cout << "[EXP/TX] begin failed\n";
+        if (auto err_begin = co_await tx.begin_errored(); err_begin) {
+            co_await tx.finish();
+            const auto &e = err_begin.value();
+
+            std::cout << "[TX] begin failed" << toString(e.code) << ", " << e.error << ", " << e.err_detail.sqlstate <<
+                    ", "
+                    << e.err_detail.message;
             co_return;
         }
 
@@ -1154,10 +1243,17 @@ task::Awaitable<void> test_enum_support(usub::pg::PgPool &pool) { {
             co_return;
         }
     } {
-        auto rows = co_await pool.query_reflect<EnumRow>(
+        auto rows = co_await pool.query_reflect_expected<EnumRow>(
             "SELECT id, name, kind, alt_kind, kinds FROM users_enum ORDER BY id");
-        std::cout << "[ENUM/SELECT] n=" << rows.size() << "\n";
-        for (auto &r: rows) {
+        if (!rows.has_value()) {
+            auto &error = rows.error();
+            std::cout << "PgQuery failed: " << toString(error.code) << ", " << error.err_detail.sqlstate << ", " <<
+                    error.err_detail.message << "\n";
+            co_return;
+        }
+        auto rows_unwrapped = rows.value();
+        std::cout << "[ENUM/SELECT] n=" << rows_unwrapped.size() << "\n";
+        for (auto &r: rows_unwrapped) {
             std::cout << "  id=" << r.id
                     << " name=" << r.name
                     << " kind=" << (r.kind == RoleKind::admin ? "admin" : r.kind == RoleKind::user ? "user" : "guest")
@@ -1243,9 +1339,7 @@ static void print_pg_err(const usub::pg::QueryResult &r) {
 usub::uvent::task::Awaitable<void> test_pgjson_ujson(usub::pg::PgPool &pool) {
     using namespace usub::pg;
 
-    std::cout << "[JSON] start\n";
-
-    {
+    std::cout << "[JSON] start\n"; {
         auto r = co_await pool.query_awaitable(R"SQL(
             CREATE TABLE IF NOT EXISTS users_json_demo (
                 id        BIGSERIAL PRIMARY KEY,
@@ -1253,36 +1347,42 @@ usub::uvent::task::Awaitable<void> test_pgjson_ujson(usub::pg::PgPool &pool) {
                 profile   JSONB NOT NULL
             );
         )SQL");
-        if (!r.ok) { std::cerr << "[JSON/SCHEMA] " << r.error << "\n"; co_return; }
+        if (!r.ok) {
+            std::cerr << "[JSON/SCHEMA] " << r.error << "\n";
+            co_return;
+        }
 
         auto t = co_await pool.query_awaitable("TRUNCATE users_json_demo RESTART IDENTITY");
-        if (!t.ok) { std::cerr << "[JSON/TRUNCATE] " << t.error << "\n"; co_return; }
+        if (!t.ok) {
+            std::cerr << "[JSON/TRUNCATE] " << t.error << "\n";
+            co_return;
+        }
 
         std::cout << "[JSON/SCHEMA+TRUNCATE] OK\n";
-    }
-
-    {
-        Profile p{ .age = 27, .city = std::string("AMS"), .flags = {"a","b"} };
+    } {
+        Profile p{.age = 27, .city = std::string("AMS"), .flags = {"a", "b"}};
         std::string name = "kirill";
 
         auto ins = co_await pool.exec_reflect(
             "INSERT INTO users_json_demo(username, profile) VALUES($1,$2)",
             std::tuple{name, usub::pg::pg_jsonb(p)}
         );
-        if (!ins.ok) { std::cerr << "[JSON/INSERT good] " << ins.error << "\n"; co_return; }
+        if (!ins.ok) {
+            std::cerr << "[JSON/INSERT good] " << ins.error << "\n";
+            co_return;
+        }
         std::cout << "[JSON/INSERT good] OK\n";
-    }
-
-    {
+    } {
         auto ins = co_await pool.query_awaitable(R"SQL(
             INSERT INTO users_json_demo(username, profile)
             VALUES ('broken', '{"age":1,"city":"A","flags":["x"],"UNKNOWN":123}'::jsonb);
         )SQL");
-        if (!ins.ok) { std::cerr << "[JSON/INSERT broken] " << ins.error << "\n"; co_return; }
+        if (!ins.ok) {
+            std::cerr << "[JSON/INSERT broken] " << ins.error << "\n";
+            co_return;
+        }
         std::cout << "[JSON/INSERT broken] OK\n";
-    }
-
-    {
+    } {
         auto rows = co_await pool.query_reflect_expected<UserJsonRowStrict>(
             "SELECT id, username, profile FROM users_json_demo "
             "WHERE username <> 'broken' ORDER BY id"
@@ -1290,52 +1390,48 @@ usub::uvent::task::Awaitable<void> test_pgjson_ujson(usub::pg::PgPool &pool) {
 
         if (!rows) {
             std::cerr << "[JSON/SELECT strict good] FAIL code=" << toString(rows.error().code)
-                      << " err='" << rows.error().error << "'\n";
+                    << " err='" << rows.error().error << "'\n";
         } else {
             std::cout << "[JSON/SELECT strict good] OK n=" << rows->size() << "\n";
             for (auto &r: *rows) {
                 std::cout << "  id=" << r.id
-                          << " username=" << r.username
-                          << " age=" << r.profile.value.age
-                          << " city=" << (r.profile.value.city ? *r.profile.value.city : "<NULL>")
-                          << " flags=" << r.profile.value.flags.size()
-                          << "\n";
+                        << " username=" << r.username
+                        << " age=" << r.profile.value.age
+                        << " city=" << (r.profile.value.city ? *r.profile.value.city : "<NULL>")
+                        << " flags=" << r.profile.value.flags.size()
+                        << "\n";
             }
         }
-    }
-
-    {
+    } {
         auto rows = co_await pool.query_reflect_expected<UserJsonRowStrict>(
             "SELECT id, username, profile FROM users_json_demo WHERE username='broken' LIMIT 1"
         );
 
         if (!rows) {
             std::cout << "[JSON/SELECT strict broken] EXPECTED FAIL code=" << toString(rows.error().code)
-                      << " err='" << rows.error().error << "'\n";
+                    << " err='" << rows.error().error << "'\n";
         } else {
             std::cout << "[JSON/SELECT strict broken] UNEXPECTED OK n=" << rows->size() << "\n";
         }
-    }
-
-    {
+    } {
         auto rows = co_await pool.query_reflect_expected<UserJsonRowLoose>(
             "SELECT id, username, profile FROM users_json_demo WHERE username='broken' LIMIT 1"
         );
 
         if (!rows) {
             std::cerr << "[JSON/SELECT loose] FAIL code=" << toString(rows.error().code)
-                      << " err='" << rows.error().error << "'\n";
+                    << " err='" << rows.error().error << "'\n";
             co_return;
         }
 
         std::cout << "[JSON/SELECT loose] OK n=" << rows->size() << "\n";
         for (auto &r: *rows) {
             std::cout << "  id=" << r.id
-                      << " username=" << r.username
-                      << " age=" << r.profile.value.age
-                      << " city=" << (r.profile.value.city ? *r.profile.value.city : "<NULL>")
-                      << " flags=" << r.profile.value.flags.size()
-                      << "\n";
+                    << " username=" << r.username
+                    << " age=" << r.profile.value.age
+                    << " city=" << (r.profile.value.city ? *r.profile.value.city : "<NULL>")
+                    << " flags=" << r.profile.value.flags.size()
+                    << "\n";
         }
     }
 
@@ -1348,7 +1444,7 @@ int main() {
     usub::Uvent uvent(1);
 
     usub::pg::PgPool pool(
-        "localshost",
+        "localhost",
         "12432",
         "postgres",
         "postgres",
