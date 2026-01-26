@@ -17,6 +17,7 @@
 
 #include "PgConnection.h"
 #include "PgTypes.h"
+#include "utils/ConnInfo.h"
 #include "uvent/Uvent.h"
 #include "uvent/utils/datastructures/queue/ConcurrentQueues.h"
 
