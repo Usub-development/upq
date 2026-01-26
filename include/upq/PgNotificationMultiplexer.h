@@ -58,7 +58,7 @@ namespace usub::pg {
 
         PgNotificationMultiplexer(std::shared_ptr<PgConnectionLibpq> conn, std::string host,
                                   std::string port, std::string user, std::string db,
-                                  std::string password, SSLConfig ssl_config = {}, Config cfg = {})
+                                  std::string password, Config cfg = {}, SSLConfig ssl_config = {})
             : conn_(std::move(conn)),
               host_(std::move(host)),
               port_(std::move(port)),
