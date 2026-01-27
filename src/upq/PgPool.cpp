@@ -250,5 +250,6 @@ namespace usub::pg {
 #endif
         conn->close();
         this->live_count_.fetch_sub(1, std::memory_order_relaxed);
+        idle_sem_.release();
     }
 } // namespace usub::pg
