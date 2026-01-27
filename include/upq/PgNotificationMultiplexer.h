@@ -31,7 +31,7 @@ namespace usub::pg {
     };
 
     class PgNotificationMultiplexer {
-       public:
+    public:
         struct Config {
             size_t channel_queue_capacity;
             size_t pending_after_disconnect_capacity;
@@ -48,7 +48,8 @@ namespace usub::pg {
                   pending_after_disconnect_capacity(pending_after_disconnect_capacity_),
                   reconnect_backoff_us(reconnect_backoff_us_),
                   max_recursive_depth(max_recursive_depth_),
-                  rate_limit_per_sec(rate_limit_per_sec_) {}
+                  rate_limit_per_sec(rate_limit_per_sec_) {
+            }
         };
 
         struct HandlerHandle {
@@ -71,18 +72,18 @@ namespace usub::pg {
             next_handler_id_.store(1, std::memory_order_relaxed);
         }
 
-        usub::uvent::task::Awaitable<std::optional<HandlerHandle>> add_handler(
-            const std::string& channel, std::shared_ptr<IPgNotifyHandler> handler) {
+        usub::uvent::task::Awaitable<std::optional<HandlerHandle> > add_handler(
+            const std::string &channel, std::shared_ptr<IPgNotifyHandler> handler) {
             uint64_t hid = next_handler_id_.fetch_add(1, std::memory_order_relaxed);
 
             bool is_wild = is_wildcard(channel);
             if (is_wild) {
-                auto& info = wildcard_[channel];
+                auto &info = wildcard_[channel];
                 info.handlers.emplace_back(hid, std::move(handler));
                 co_return HandlerHandle{hid, channel, true};
             }
 
-            auto& ci = exact_[channel];
+            auto &ci = exact_[channel];
             bool first_for_channel = ci.handlers.empty();
 
             ci.handlers.emplace_back(hid, std::move(handler));
@@ -97,11 +98,11 @@ namespace usub::pg {
             co_return HandlerHandle{hid, channel, false};
         }
 
-        bool remove_handler(const HandlerHandle& h) {
+        bool remove_handler(const HandlerHandle &h) {
             if (h.wildcard) {
                 auto it = wildcard_.find(h.channel);
                 if (it == wildcard_.end()) return false;
-                auto& vec = it->second.handlers;
+                auto &vec = it->second.handlers;
                 for (auto vit = vec.begin(); vit != vec.end(); ++vit) {
                     if (vit->first == h.id) {
                         vec.erase(vit);
@@ -116,7 +117,7 @@ namespace usub::pg {
 
             auto it = exact_.find(h.channel);
             if (it == exact_.end()) return false;
-            auto& vec = it->second.handlers;
+            auto &vec = it->second.handlers;
             for (auto vit = vec.begin(); vit != vec.end(); ++vit) {
                 if (vit->first == h.id) {
                     vec.erase(vit);
@@ -131,7 +132,7 @@ namespace usub::pg {
             return false;
         }
 
-        bool remove_channel(const std::string& channel) {
+        bool remove_channel(const std::string &channel) {
             bool is_wild = is_wildcard(channel);
             if (is_wild) {
                 auto it = wildcard_.find(channel);
@@ -165,7 +166,7 @@ namespace usub::pg {
 
                 co_await conn_->wait_readable_for_listener();
 
-                PGconn* raw = conn_->raw_conn();
+                PGconn *raw = conn_->raw_conn();
                 if (!raw) {
                     continue;
                 }
@@ -178,11 +179,11 @@ namespace usub::pg {
                 }
 
                 while (true) {
-                    PGnotify* n = PQnotifies(raw);
+                    PGnotify *n = PQnotifies(raw);
                     if (!n) break;
 
-                    const char* ch_raw = n->relname ? n->relname : "";
-                    const char* pl_raw = n->extra ? n->extra : "";
+                    const char *ch_raw = n->relname ? n->relname : "";
+                    const char *pl_raw = n->extra ? n->extra : "";
                     int be_pid = n->be_pid;
 
                     dispatch_event(ch_raw, pl_raw, be_pid);
@@ -202,22 +203,22 @@ namespace usub::pg {
 
         Stats stats() const {
             Stats s;
-            for (auto const& kv : channel_runtime_) {
+            for (auto const &kv: channel_runtime_) {
                 s.dropped_overflow += kv.second.dropped_overflow.load(std::memory_order_relaxed);
                 s.dropped_recursive += kv.second.dropped_recursive.load(std::memory_order_relaxed);
                 s.dropped_rate_limited +=
-                    kv.second.dropped_rate_limited.load(std::memory_order_relaxed);
+                        kv.second.dropped_rate_limited.load(std::memory_order_relaxed);
             }
             return s;
         }
 
-       private:
+    private:
         struct ChannelInfo {
-            std::vector<std::pair<uint64_t, std::shared_ptr<IPgNotifyHandler>>> handlers;
+            std::vector<std::pair<uint64_t, std::shared_ptr<IPgNotifyHandler> > > handlers;
         };
 
         struct WildcardInfo {
-            std::vector<std::pair<uint64_t, std::shared_ptr<IPgNotifyHandler>>> handlers;
+            std::vector<std::pair<uint64_t, std::shared_ptr<IPgNotifyHandler> > > handlers;
         };
 
         struct PendingEvent {
@@ -242,18 +243,19 @@ namespace usub::pg {
 
             static uint64_t now_ns() {
                 auto n = std::chrono::steady_clock::now().time_since_epoch();
-                return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(n).count();
+                return (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(n).count();
             }
 
-            ChannelRuntimeState(const ChannelRuntimeState&) = delete;
-            ChannelRuntimeState& operator=(const ChannelRuntimeState&) = delete;
+            ChannelRuntimeState(const ChannelRuntimeState &) = delete;
+
+            ChannelRuntimeState &operator=(const ChannelRuntimeState &) = delete;
         };
 
         inline static thread_local uint32_t tls_dispatch_depth = 0;
         inline static thread_local std::string tls_last_channel;
         inline static thread_local std::string tls_last_payload;
 
-        static bool is_wildcard(const std::string& ch) {
+        static bool is_wildcard(const std::string &ch) {
             size_t n = ch.size();
             if (n < 2) return false;
             if (ch.back() != '*') return false;
@@ -261,13 +263,13 @@ namespace usub::pg {
             return true;
         }
 
-        static bool is_simple_ident(const std::string& s) {
+        static bool is_simple_ident(const std::string &s) {
             if (s.empty()) return false;
-            unsigned char c0 = (unsigned char)s[0];
+            unsigned char c0 = (unsigned char) s[0];
             if (!((c0 >= 'a' && c0 <= 'z') || c0 == '_')) return false;
 
             for (size_t i = 1; i < s.size(); ++i) {
-                unsigned char c = (unsigned char)s[i];
+                unsigned char c = (unsigned char) s[i];
                 bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || (c == '_');
                 if (!ok) return false;
             }
@@ -275,13 +277,13 @@ namespace usub::pg {
             return true;
         }
 
-        static std::string quote_ident_channel(const std::string& ch) {
+        static std::string quote_ident_channel(const std::string &ch) {
             if (is_simple_ident(ch)) return ch;
 
             std::string out;
             out.reserve(ch.size() + 2);
             out.push_back('"');
-            for (char c : ch) {
+            for (char c: ch) {
                 if (c == '"') out.push_back('"');
                 out.push_back(c);
             }
@@ -301,12 +303,18 @@ namespace usub::pg {
             for (;;) {
                 auto newConn = std::make_shared<PgConnectionLibpq>();
 
-                auto conninfo = make_conninfo(host_, port_, user_, db_, password_, ssl_config_);
-                if (!conninfo) co_return false;
+                auto conninfo = make_conninfo(this->host_, this->port_, this->user_, this->db_, this->password_,
+                                        this->ssl_config_);
+                if (!conninfo) {
+                    co_await usub::uvent::system::this_coroutine::sleep_for(
+                        std::chrono::microseconds(cfg_.reconnect_backoff_us));
+                    continue;
+                }
 
                 auto err = co_await newConn->connect_async(conninfo.value());
                 if (!err.has_value()) {
                     conn_ = newConn;
+
                     bool ok = co_await resubscribe_all();
                     if (ok) {
                         flush_pending_after_disconnect();
@@ -320,7 +328,7 @@ namespace usub::pg {
         }
 
         usub::uvent::task::Awaitable<bool> resubscribe_all() {
-            for (auto const& kv : exact_) {
+            for (auto const &kv: exact_) {
                 std::string sql = "LISTEN " + quote_ident_channel(kv.first) + ";";
                 QueryResult qr = co_await conn_->exec_simple_query_nonblocking(sql);
                 if (!qr.ok) {
@@ -331,13 +339,13 @@ namespace usub::pg {
         }
 
         void flush_pending_after_disconnect() {
-            for (auto& ev : pending_after_disconnect_) {
+            for (auto &ev: pending_after_disconnect_) {
                 dispatch_event(ev.channel, ev.payload, ev.pid);
             }
             pending_after_disconnect_.clear();
         }
 
-        usub::uvent::task::Awaitable<bool> listen_channel(const std::string& channel) {
+        usub::uvent::task::Awaitable<bool> listen_channel(const std::string &channel) {
             std::string sql = "LISTEN " + quote_ident_channel(channel) + ";";
             QueryResult qr = co_await conn_->exec_simple_query_nonblocking(sql);
             if (!qr.ok) {
@@ -346,13 +354,13 @@ namespace usub::pg {
             co_return true;
         }
 
-        void unlisten_channel_sync(const std::string& channel) {
+        void unlisten_channel_sync(const std::string &channel) {
             if (!ensure_connected()) return;
             std::string sql = "UNLISTEN " + quote_ident_channel(channel) + ";";
             usub::uvent::system::co_spawn(conn_->exec_simple_query_nonblocking(sql));
         }
 
-        void ensure_channel_runtime(const std::string& channel) {
+        void ensure_channel_runtime(const std::string &channel) {
             if (channel_runtime_.find(channel) != channel_runtime_.end()) return;
 
             channel_runtime_.emplace(std::piecewise_construct, std::forward_as_tuple(channel),
@@ -360,11 +368,11 @@ namespace usub::pg {
         }
 
         void start_channel_workers() {
-            for (auto& kv : channel_runtime_) {
-                auto& state = kv.second;
+            for (auto &kv: channel_runtime_) {
+                auto &state = kv.second;
                 bool expected = false;
                 if (state.worker_running.compare_exchange_strong(
-                        expected, true, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+                    expected, true, std::memory_order_acq_rel, std::memory_order_relaxed)) {
                     std::string ch_copy = kv.first;
                     usub::uvent::system::co_spawn(channel_worker(ch_copy, this));
                 }
@@ -395,13 +403,13 @@ namespace usub::pg {
 
                 bool expected = false;
                 if (it->second.worker_running.compare_exchange_strong(
-                        expected, true, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+                    expected, true, std::memory_order_acq_rel, std::memory_order_relaxed)) {
                     std::string ch_copy2 = it->first;
                     usub::uvent::system::co_spawn(channel_worker(ch_copy2, this));
                 }
             }
 
-            auto& state = it->second;
+            auto &state = it->second;
             PendingEvent ev{std::string(ch), std::string(payload), pid};
 
             if (!push_rate_limited(state, ev)) {
@@ -415,7 +423,7 @@ namespace usub::pg {
             }
         }
 
-        bool push_rate_limited(ChannelRuntimeState& st, const PendingEvent&) {
+        bool push_rate_limited(ChannelRuntimeState &st, const PendingEvent &) {
             uint64_t now = ChannelRuntimeState::now_ns();
             uint64_t last = st.last_tick_ns.load(std::memory_order_relaxed);
 
@@ -433,7 +441,7 @@ namespace usub::pg {
         }
 
         static usub::uvent::task::Awaitable<void> channel_worker(std::string channel_name,
-                                                                 PgNotificationMultiplexer* self) {
+                                                                 PgNotificationMultiplexer *self) {
             using namespace std::chrono_literals;
 
             for (;;) {
@@ -442,7 +450,7 @@ namespace usub::pg {
                     co_return;
                 }
 
-                auto& st = it->second;
+                auto &st = it->second;
 
                 PendingEvent ev;
                 if (!st.queue.try_dequeue(ev)) {
@@ -456,14 +464,14 @@ namespace usub::pg {
             co_return;
         }
 
-        void dispatch_to_handlers_ordered(const PendingEvent& ev, ChannelRuntimeState& st) {
+        void dispatch_to_handlers_ordered(const PendingEvent &ev, ChannelRuntimeState &st) {
             if (!check_recursion(ev)) {
                 st.dropped_recursive.fetch_add(1, std::memory_order_relaxed);
                 return;
             }
 
-            ChannelInfo* ci_exact = nullptr;
-            std::vector<WildcardInfo*> ci_wild;
+            ChannelInfo *ci_exact = nullptr;
+            std::vector<WildcardInfo *> ci_wild;
 
             bool have_exact = get_exact_handlers(ev.channel, ci_exact);
             bool have_wild = get_wild_handlers(ev.channel, ci_wild);
@@ -473,7 +481,7 @@ namespace usub::pg {
             }
 
             if (have_exact) {
-                for (auto& pair : ci_exact->handlers) {
+                for (auto &pair: ci_exact->handlers) {
                     std::shared_ptr<IPgNotifyHandler> hptr = pair.second;
                     std::string ch_copy = ev.channel;
                     std::string pl_copy = ev.payload;
@@ -485,8 +493,8 @@ namespace usub::pg {
             }
 
             if (have_wild) {
-                for (auto* wi : ci_wild) {
-                    for (auto& pair : wi->handlers) {
+                for (auto *wi: ci_wild) {
+                    for (auto &pair: wi->handlers) {
                         std::shared_ptr<IPgNotifyHandler> hptr = pair.second;
                         std::string ch_copy = ev.channel;
                         std::string pl_copy = ev.payload;
@@ -499,7 +507,7 @@ namespace usub::pg {
             }
         }
 
-        bool check_recursion(const PendingEvent& ev) {
+        bool check_recursion(const PendingEvent &ev) {
             if (tls_dispatch_depth >= cfg_.max_recursive_depth) {
                 if (tls_last_channel == ev.channel && tls_last_payload == ev.payload) {
                     return false;
@@ -513,9 +521,9 @@ namespace usub::pg {
             return true;
         }
 
-        bool match_any_wildcard(const std::string& ch) const {
-            for (auto const& kv : wildcard_) {
-                const std::string& pat = kv.first;
+        bool match_any_wildcard(const std::string &ch) const {
+            for (auto const &kv: wildcard_) {
+                const std::string &pat = kv.first;
                 if (pat.size() >= 2 && pat.back() == '*' && pat[pat.size() - 2] == '.') {
                     std::string prefix = pat.substr(0, pat.size() - 1);
                     if (ch.rfind(prefix, 0) == 0) return true;
@@ -524,7 +532,7 @@ namespace usub::pg {
             return false;
         }
 
-        bool get_exact_handlers(const std::string& ch, ChannelInfo*& out) {
+        bool get_exact_handlers(const std::string &ch, ChannelInfo *&out) {
             auto it = exact_.find(ch);
             if (it == exact_.end()) {
                 return false;
@@ -533,10 +541,10 @@ namespace usub::pg {
             return true;
         }
 
-        bool get_wild_handlers(const std::string& ch, std::vector<WildcardInfo*>& out_list) {
+        bool get_wild_handlers(const std::string &ch, std::vector<WildcardInfo *> &out_list) {
             bool any = false;
-            for (auto& kv : wildcard_) {
-                const std::string& pat = kv.first;
+            for (auto &kv: wildcard_) {
+                const std::string &pat = kv.first;
                 if (pat.size() >= 2 && pat.back() == '*' && pat[pat.size() - 2] == '.') {
                     std::string prefix = pat.substr(0, pat.size() - 1);
                     if (ch.rfind(prefix, 0) == 0) {
@@ -555,7 +563,7 @@ namespace usub::pg {
             co_return;
         }
 
-       private:
+    private:
         std::shared_ptr<PgConnectionLibpq> conn_;
         std::string host_;
         std::string port_;
@@ -574,6 +582,6 @@ namespace usub::pg {
 
         std::atomic<uint64_t> next_handler_id_;
     };
-}  // namespace usub::pg
+} // namespace usub::pg
 
 #endif
