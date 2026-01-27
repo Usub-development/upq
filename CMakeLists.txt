@@ -81,6 +81,14 @@ set_target_properties(upq PROPERTIES
         SOVERSION ${PROJECT_VERSION_MAJOR}
 )
 
+option(TRADER_LOCAL_DEV "Disable Pulsar producers for local dev" OFF)
+
+if(UPQ_REFLECT_DEBUG)
+        target_compile_definitions(${PROJECT_NAME} PRIVATE UPQ_REFLECT_DEBUG=1)
+else()
+        target_compile_definitions(${PROJECT_NAME} PRIVATE UPQ_REFLECT_DEBUG=0)
+endif()
+
 option(UPQ_BUILD_EXAMPLES "Build UPQ example executables" OFF)
 if (UPQ_BUILD_EXAMPLES)
         add_executable(upq_example examples/main.cpp)

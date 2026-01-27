@@ -131,7 +131,6 @@ namespace usub::pg
         Config cfg_;
         std::vector<Node> nodes_;
         std::vector<size_t> primary_failover_idx_;
-        mutable std::mutex mu_;
 
         Node* pick_primary();
         Node* pick_best_replica(const RouteHint& hint);
