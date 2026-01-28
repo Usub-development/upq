@@ -113,20 +113,20 @@ namespace usub::pg {
 
         // ---- TCP keepalive ----
         // libpq: keepalives(0/1), keepalives_idle, keepalives_interval, keepalives_count
-        if (keepalive_config.enabled) {
-            if (auto r = add_int(ci, "keepalives", 1); !r) return std::unexpected(r.error());
-
-            if (auto r = add_int(ci, "keepalives_idle", keepalive_config.idle); !r)
-                return std::unexpected(r.error());
-
-            if (auto r = add_int(ci, "keepalives_interval", keepalive_config.interval); !r)
-                return std::unexpected(r.error());
-
-            if (auto r = add_int(ci, "keepalives_count", keepalive_config.count); !r)
-                return std::unexpected(r.error());
-        } else {
-            // if (auto r = add_int(ci, "keepalives", 0); !r) return std::unexpected(r.error());
-        }
+        // if (keepalive_config.enabled) {
+        //     if (auto r = add_int(ci, "keepalives", 1); !r) return std::unexpected(r.error());
+        //
+        //     if (auto r = add_int(ci, "keepalives_idle", keepalive_config.idle); !r)
+        //         return std::unexpected(r.error());
+        //
+        //     if (auto r = add_int(ci, "keepalives_interval", keepalive_config.interval); !r)
+        //         return std::unexpected(r.error());
+        //
+        //     if (auto r = add_int(ci, "keepalives_count", keepalive_config.count); !r)
+        //         return std::unexpected(r.error());
+        // } else {
+        //     // if (auto r = add_int(ci, "keepalives", 0); !r) return std::unexpected(r.error());
+        // }
 
         return ci;
     }
