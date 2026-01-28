@@ -576,15 +576,14 @@ namespace usub::pg {
 
         this->connected_ = false;
 
+        if (this->sock_) {
+            this->sock_->shutdown();
+            this->sock_.reset();
+        }
+
         if (this->conn_) {
             PQfinish(this->conn_);
             this->conn_ = nullptr;
-        }
-
-        if (this->sock_) {
-            this->sock_->shutdown();
-            usub::uvent::system::this_thread::detail::pl.deregisterEvent(sock_->get_raw_header());
-            this->sock_.reset();
         }
     }
 
