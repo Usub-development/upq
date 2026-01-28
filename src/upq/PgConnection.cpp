@@ -583,6 +583,7 @@ namespace usub::pg {
 
         if (this->sock_) {
             this->sock_->shutdown();
+            usub::uvent::system::this_thread::detail::pl.removeEvent(sock_->get_raw_header());
             this->sock_.reset();
         }
     }
