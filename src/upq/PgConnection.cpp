@@ -583,7 +583,6 @@ namespace usub::pg {
 
         if (this->sock_) {
             this->sock_->shutdown();
-            this->sock_->remove();
             this->sock_.reset();
         }
     }
