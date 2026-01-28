@@ -595,11 +595,11 @@ namespace usub::pg {
 
     static inline std::string to_string(SSLMode m) {
         switch (m) {
-            case SSLMode::disable:     return "disable";
-            case SSLMode::allow:       return "allow";
-            case SSLMode::prefer:      return "prefer";
-            case SSLMode::require:     return "require";
-            case SSLMode::verify_ca:   return "verify-ca";
+            case SSLMode::disable: return "disable";
+            case SSLMode::allow: return "allow";
+            case SSLMode::prefer: return "prefer";
+            case SSLMode::require: return "require";
+            case SSLMode::verify_ca: return "verify-ca";
             case SSLMode::verify_full: return "verify-full";
         }
         return "prefer";
@@ -618,6 +618,15 @@ namespace usub::pg {
 
         // For verify-full when connecting by IP but validating DNS name
         std::optional<std::string> server_hostname;
+    };
+
+    struct TCPKeepaliveConfig {
+        bool enabled{true};
+
+        int keepalives{1}; // 0/1
+        int idle{30}; // idle before probes
+        int interval{10}; // between probes
+        int count{3}; // probes before drop
     };
 
     class PgConnectionLibpq {

@@ -10,8 +10,13 @@
 
 namespace usub::pg {
     static inline std::expected<std::string, utils::ConninfoError> make_conninfo(
-        std::string_view host, std::string_view port, std::string_view user,
-        std::string_view dbname, std::string_view password, const SSLConfig &ssl) {
+        std::string_view host,
+        std::string_view port,
+        std::string_view user,
+        std::string_view dbname,
+        std::string_view password,
+        const SSLConfig &ssl,
+        const TCPKeepaliveConfig &keepalive_config) {
         using utils::escape_conninfo_value;
         using utils::is_ip_literal;
         using utils::strip_brackets;
@@ -21,6 +26,14 @@ namespace usub::pg {
             out.append(k);
             out.push_back('=');
             out.append(ev);
+        };
+
+        auto add_int = [&](std::string &out, std::string_view k, int v)
+            -> std::expected<void, utils::ConninfoError> {
+            auto ev = escape_conninfo_value(std::to_string(v));
+            if (!ev) return std::unexpected(ev.error());
+            add_kv(out, k, *ev);
+            return {};
         };
 
         std::string ci;
@@ -98,8 +111,25 @@ namespace usub::pg {
             add_kv(ci, "sslcrl", *ev);
         }
 
+        // ---- TCP keepalive ----
+        // libpq: keepalives(0/1), keepalives_idle, keepalives_interval, keepalives_count
+        if (keepalive_config.enabled) {
+            if (auto r = add_int(ci, "keepalives", 1); !r) return std::unexpected(r.error());
+
+            if (auto r = add_int(ci, "keepalives_idle", keepalive_config.idle); !r)
+                return std::unexpected(r.error());
+
+            if (auto r = add_int(ci, "keepalives_interval", keepalive_config.interval); !r)
+                return std::unexpected(r.error());
+
+            if (auto r = add_int(ci, "keepalives_count", keepalive_config.count); !r)
+                return std::unexpected(r.error());
+        } else {
+            // if (auto r = add_int(ci, "keepalives", 0); !r) return std::unexpected(r.error());
+        }
+
         return ci;
     }
-}  // namespace usub::pg
+} // namespace usub::pg
 
 #endif  // BACKEND_NOTIFICATION_HANDLER_CONNINFO_H

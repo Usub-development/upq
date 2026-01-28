@@ -59,7 +59,8 @@ namespace usub::pg {
                std::string db,
                std::string password,
                size_t max_pool_size = 32,
-               int retries_on_connection_failed = 20, SSLConfig ssl_config = {});
+               int retries_on_connection_failed = 20, SSLConfig ssl_config = {},
+               TCPKeepaliveConfig keepalive_config = {});
 
         ~PgPool();
 
@@ -315,6 +316,7 @@ namespace usub::pg {
 
         usub::uvent::sync::AsyncSemaphore idle_sem_{0};
         SSLConfig ssl_config_;
+        TCPKeepaliveConfig keepalive_config_;
     };
 
     template<typename... Args>

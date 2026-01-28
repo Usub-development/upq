@@ -66,6 +66,13 @@ namespace usub::pg {
             return *this;
         }
 
+        template<typename CFG>
+        PgConnectorBuilder &keepalive_config(CFG &&keepalive_config) requires std::same_as<std::remove_cvref_t<CFG>,
+            TCPKeepaliveConfig> {
+            this->cfg_.keepalive_config = std::forward<CFG>(keepalive_config);
+            return *this;
+        }
+
         PgConnector build() {
             validate();
             return usub::pg::PgConnector(std::move(this->cfg_));

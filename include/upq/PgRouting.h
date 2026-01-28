@@ -93,6 +93,7 @@ namespace usub::pg
         HealthCfg health{};
         uint32_t connect_retries{20};
         SSLConfig ssl_config{};
+        TCPKeepaliveConfig keepalive_config{};
     };
 
     struct Row

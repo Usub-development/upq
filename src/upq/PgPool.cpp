@@ -10,7 +10,7 @@ namespace usub::pg {
                    std::string db,
                    std::string password,
                    size_t max_pool_size,
-                   int retries_on_connection_failed, SSLConfig ssl_config)
+                   int retries_on_connection_failed, SSLConfig ssl_config, TCPKeepaliveConfig keepalive_config)
         : host_(std::move(host))
           , port_(std::move(port))
           , user_(std::move(user))
@@ -21,7 +21,7 @@ namespace usub::pg {
           , live_count_(0)
           , stats_{}
           , retries_on_connection_failed_(retries_on_connection_failed)
-          , idle_sem_(0), ssl_config_(std::move(ssl_config)) {
+          , idle_sem_(0), ssl_config_(std::move(ssl_config)), keepalive_config_(keepalive_config) {
 #if UPQ_POOL_DEBUG
         UPQ_POOL_DBG("ctor: host=%s port=%s user=%s db=%s max_pool=%zu retries=%d",
                      host_.c_str(), port_.c_str(), user_.c_str(), db_.c_str(),
@@ -114,10 +114,11 @@ namespace usub::pg {
 
                     auto newConn = std::make_shared<PgConnectionLibpq>();
 
-                    auto conninfo = make_conninfo(host_, port_, user_, db_, password_, ssl_config_);
-                    if (!conninfo) co_return std::unexpected(PgOpError{
-                        PgErrorCode::ProtocolCorrupt, "conninfo contains NUL", {}
-                    });
+                    auto conninfo = make_conninfo(host_, port_, user_, db_, password_, ssl_config_, this->keepalive_config_);
+                    if (!conninfo)
+                        co_return std::unexpected(PgOpError{
+                            PgErrorCode::ProtocolCorrupt, "conninfo contains NUL", {}
+                        });
 
                     bool connected = false;
                     std::optional<std::string> last_err;

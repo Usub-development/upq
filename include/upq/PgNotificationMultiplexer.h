@@ -60,7 +60,8 @@ namespace usub::pg {
 
         PgNotificationMultiplexer(std::shared_ptr<PgConnectionLibpq> conn, std::string host,
                                   std::string port, std::string user, std::string db,
-                                  std::string password, Config cfg = {}, SSLConfig ssl_config = {})
+                                  std::string password, Config cfg = {}, SSLConfig ssl_config = {},
+                                  TCPKeepaliveConfig keepalive_config = {})
             : conn_(std::move(conn)),
               host_(std::move(host)),
               port_(std::move(port)),
@@ -68,7 +69,8 @@ namespace usub::pg {
               db_(std::move(db)),
               password_(std::move(password)),
               ssl_config_(ssl_config),
-              cfg_(cfg) {
+              cfg_(cfg),
+              keepalive_config_(keepalive_config) {
             next_handler_id_.store(1, std::memory_order_relaxed);
         }
 
@@ -304,7 +306,7 @@ namespace usub::pg {
                 auto newConn = std::make_shared<PgConnectionLibpq>();
 
                 auto conninfo = make_conninfo(this->host_, this->port_, this->user_, this->db_, this->password_,
-                                        this->ssl_config_);
+                                              this->ssl_config_, this->keepalive_config_);
                 if (!conninfo) {
                     co_await usub::uvent::system::this_coroutine::sleep_for(
                         std::chrono::microseconds(cfg_.reconnect_backoff_us));
@@ -571,6 +573,7 @@ namespace usub::pg {
         std::string db_;
         std::string password_;
         SSLConfig ssl_config_;
+        TCPKeepaliveConfig keepalive_config_;
         Config cfg_;
 
         std::unordered_map<std::string, ChannelInfo> exact_;
