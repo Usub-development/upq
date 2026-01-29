@@ -621,7 +621,7 @@ namespace usub::pg {
     };
 
     struct TCPKeepaliveConfig {
-        bool enabled{true};
+        bool enabled{false};
 
         int keepalives{1}; // 0/1
         int idle{30}; // idle before probes
