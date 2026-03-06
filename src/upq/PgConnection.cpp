@@ -616,7 +616,7 @@ namespace usub::pg {
                         if (c) cols_line += ", ";
                         cols_line += tmp.columns[c];
                     }
-                    UPQ_CONN_DBG("drain: columns[%d]: %s", ncols, cols_line.c_str());
+                    // UPQ_CONN_DBG("drain: columns[%d]: %s", ncols, cols_line.c_str());
                 }
 #endif
 

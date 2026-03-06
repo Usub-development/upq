@@ -582,6 +582,23 @@ namespace usub::pg {
         constexpr size_t count_total_params() {
             return (param_arity<Args>::value + ... + 0);
         }
+
+        constexpr size_t count_pg_params(std::string_view sql) {
+            size_t max_param = 0;
+            for (size_t i = 0; i + 1 < sql.size(); ++i) {
+                if (sql[i] == '$') {
+                    size_t num = 0;
+                    size_t j = i + 1;
+                    while (j < sql.size() && sql[j] >= '0' && sql[j] <= '9') {
+                        num = num * 10 + static_cast<size_t>(sql[j] - '0');
+                        ++j;
+                    }
+                    if (j > i + 1 && num > max_param)
+                        max_param = num;
+                }
+            }
+            return max_param;
+        }
     } // namespace detail
 
     enum class SSLMode {
@@ -728,6 +745,48 @@ namespace usub::pg {
                 auto v = usub::pg::map_single_reflect_positional<T>(qr, 0);
                 co_return v;
             }
+        }
+
+        template<typename Sql, typename... Args>
+            requires (std::is_convertible_v<Sql, std::string_view>
+                      && !std::is_same_v<std::decay_t<Sql>, std::string>)
+        usub::uvent::task::Awaitable<QueryResult>
+        exec_param_query_nonblocking(Sql &&sql, Args &&... args) {
+            constexpr size_t actual = detail::count_total_params<Args...>();
+            const std::string_view sv(sql);
+            const size_t expected = detail::count_pg_params(sv);
+            assert(expected == actual &&
+                "pg: $N placeholder count does not match argument count");
+            co_return co_await exec_param_query_nonblocking(
+                std::string(sv), std::forward<Args>(args)...);
+        }
+
+        template<class T, typename Sql, typename... Args>
+            requires (std::is_convertible_v<Sql, std::string_view>
+                      && !std::is_same_v<std::decay_t<Sql>, std::string>)
+        usub::uvent::task::Awaitable<std::vector<T> >
+        exec_param_query_nonblocking(Sql &&sql, Args &&... args) {
+            constexpr size_t actual = detail::count_total_params<Args...>();
+            const std::string_view sv(sql);
+            const size_t expected = detail::count_pg_params(sv);
+            assert(expected == actual &&
+                "pg: $N placeholder count does not match argument count");
+            co_return co_await exec_param_query_nonblocking<T>(
+                std::string(sv), std::forward<Args>(args)...);
+        }
+
+        template<class T, typename Sql, typename... Args>
+            requires (std::is_convertible_v<Sql, std::string_view>
+                      && !std::is_same_v<std::decay_t<Sql>, std::string>)
+        usub::uvent::task::Awaitable<std::optional<T> >
+        exec_param_query_one_nonblocking(Sql &&sql, Args &&... args) {
+            constexpr size_t actual = detail::count_total_params<Args...>();
+            const std::string_view sv(sql);
+            const size_t expected = detail::count_pg_params(sv);
+            assert(expected == actual &&
+                "pg: $N placeholder count does not match argument count");
+            co_return co_await exec_param_query_one_nonblocking<T>(
+                std::string(sv), std::forward<Args>(args)...);
         }
 
         usub::uvent::task::Awaitable<PgCopyResult> copy_in_start(const std::string &sql);
